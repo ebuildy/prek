@@ -1088,6 +1088,7 @@
         "check-json",
         "check-json5",
         "check-jsonc",
+        "check-jsonschema",
         "check-merge-conflict",
         "check-shebang-scripts-are-executable",
         "check-signed-commit",

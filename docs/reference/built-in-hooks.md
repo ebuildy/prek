@@ -20,6 +20,7 @@ For `repo: builtin`, the following hooks are supported:
 - [`check-json`](#check-json) (Checks JSON files for parseable syntax.)
 - [`check-json5`](#check-json5) (Checks JSON5 files for parseable syntax.)
 - [`check-jsonc`](#check-jsonc) (Checks JSONC files for parseable syntax.)
+- [`check-jsonschema`](#check-jsonschema) (Validates JSON, YAML and TOML files against a JSON Schema.)
 - [`pretty-format-json`](#pretty-format-json) (Checks that JSON files are pretty-formatted.)
 - [`check-toml`](#check-toml) (Checks TOML files for parseable syntax.)
 - [`check-vcs-permalinks`](#check-vcs-permalinks) (Ensures that links to VCS websites are permalinks.)
@@ -316,6 +317,36 @@ repos:
 **Caveats / differences**
 
 - This implementation rejects **duplicate object keys** (errors with `duplicate key ...`).
+
+---
+
+### `check-jsonschema`
+
+Validates JSON, YAML and TOML files against a JSON Schema. The schema is compiled once and every
+file is checked against it. All validation errors are reported per file, with the JSON Pointer of
+the failing value.
+
+The hook does not select any files by default. Set `files` (or `types`) to choose what to validate.
+The file format is detected from the extension (`.json`, `.yaml`, `.yml`, `.toml`).
+
+```yaml
+repos:
+  - repo: builtin
+    hooks:
+      - id: check-jsonschema
+        files: '^config/.*\.ya?ml$'
+        args: [--schemafile, schemas/config.schema.json]
+```
+
+**Supported arguments**
+
+- `--schemafile <PATH>`
+    - Path to the JSON Schema (JSON or YAML), relative to the project root. Required.
+
+**Caveats / differences**
+
+- Only local schema files are supported. Remote `$ref` resolution is disabled.
+- This is not a drop-in replacement for [`check-jsonschema`](https://github.com/python-jsonschema/check-jsonschema).
 
 ---
 

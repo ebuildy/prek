@@ -193,6 +193,7 @@ Builtin hooks called out by the docs include:
 - `check-json`
 - `check-json5`
 - `check-jsonc`
+- `check-jsonschema`
 - `pretty-format-json`
 - `check-toml`
 - `check-vcs-permalinks`
