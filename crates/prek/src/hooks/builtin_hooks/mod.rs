@@ -23,6 +23,7 @@ use super::{HookFuture, HookOutput};
 mod check_commit_trailers;
 mod check_json5;
 mod check_jsonc;
+mod check_jsonschema;
 mod check_signed_commit;
 mod pattern;
 
@@ -49,6 +50,7 @@ pub(crate) enum BuiltinHooks {
     CheckJson,
     CheckJson5,
     CheckJsonc,
+    CheckJsonschema,
     CheckMergeConflict,
     CheckShebangScriptsAreExecutable,
     CheckSignedCommit,
@@ -80,6 +82,7 @@ impl BuiltinHooks {
             Self::CheckAddedLargeFiles => check_added_large_files::Args::command(),
             Self::CheckCommitTrailers => check_commit_trailers::Args::command(),
             Self::CheckJsonc => check_jsonc::Args::command(),
+            Self::CheckJsonschema => check_jsonschema::Args::command(),
             Self::CheckMergeConflict => check_merge_conflict::Args::command(),
             Self::CheckVcsPermalinks => check_vcs_permalinks::Args::command(),
             Self::CheckYaml => check_yaml::Args::command(),
@@ -126,6 +129,7 @@ impl BuiltinHooks {
             Self::CheckJson => Box::pin(check_json::run(hook, filenames)),
             Self::CheckJson5 => Box::pin(check_json5::check_json5(hook, filenames)),
             Self::CheckJsonc => Box::pin(check_jsonc::check_jsonc(hook, filenames)),
+            Self::CheckJsonschema => Box::pin(check_jsonschema::run(hook, filenames)),
             Self::CheckMergeConflict => Box::pin(check_merge_conflict::run(hook, filenames)),
             Self::CheckShebangScriptsAreExecutable => {
                 Box::pin(check_shebang_scripts_are_executable::run(hook, filenames))
@@ -275,6 +279,20 @@ impl BuiltinHook {
                 options: HookOptions {
                     description: Some("Checks JSONC files for parseable syntax.".to_string()),
                     types: Some(tags::TAG_SET_JSONC),
+                    ..Default::default()
+                },
+            },
+            BuiltinHooks::CheckJsonschema => BuiltinHook {
+                id: "check-jsonschema".to_string(),
+                name: "check jsonschema".to_string(),
+                entry: "check-jsonschema".to_string(),
+                priority: None,
+                groups: None,
+                options: HookOptions {
+                    description: Some(
+                        "Validates JSON, YAML and TOML files against a JSON Schema.".to_string(),
+                    ),
+                    files: Some(FilePattern::Never),
                     ..Default::default()
                 },
             },

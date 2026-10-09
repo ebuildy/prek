@@ -44,6 +44,11 @@ fn list_builtins_defaults_to_verbose_output() {
       flags:
             --allow-trailing-commas  Allow trailing commas in objects and arrays
 
+    check-jsonschema
+      Validates JSON, YAML and TOML files against a JSON Schema.
+      flags:
+            --schemafile <PATH>  Path to a JSON Schema file (JSON or YAML), relative to the project root
+
     check-merge-conflict
       Checks for files that contain merge conflict strings.
       flags:
@@ -211,6 +216,11 @@ fn list_builtins_json() {
         "id": "check-jsonc",
         "name": "check jsonc",
         "description": "Checks JSONC files for parseable syntax."
+      },
+      {
+        "id": "check-jsonschema",
+        "name": "check jsonschema",
+        "description": "Validates JSON, YAML and TOML files against a JSON Schema."
       },
       {
         "id": "check-merge-conflict",

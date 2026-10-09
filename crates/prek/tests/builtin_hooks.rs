@@ -3770,6 +3770,47 @@ fn check_json5() {
 }
 
 #[test]
+fn check_jsonschema() {
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
+        repos:
+          - repo: builtin
+            hooks:
+              - id: check-jsonschema
+                files: ^config/
+                args: [--schemafile, schema.json]
+    "})
+        .with_file(
+            "schema.json",
+            indoc::indoc! {r#"
+        {
+            "type": "object",
+            "required": ["name"],
+            "properties": {"port": {"type": "integer"}}
+        }
+    "#},
+        )
+        .with_file("config/bad.yaml", "port: nope\n")
+        .with_file("config/good.toml", "name = \"x\"\n")
+        .init_git();
+
+    cmd_snapshot!(context, context.run(), @r#"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check jsonschema.........................................................Failed
+    - hook id: check-jsonschema
+    - description: Validates JSON, YAML and TOML files against a JSON Schema
+    - exit code: 1
+
+      config/bad.yaml: /: "name" is a required property
+      config/bad.yaml: /port: "nope" is not of type "integer"
+
+    ----- stderr -----
+    "#);
+}
+
+#[test]
 fn check_jsonc() {
     let context = TestEnv::new()
         .with_config(indoc::indoc! {r"
