@@ -15,11 +15,15 @@ use reqwest::header::{ETAG, IF_NONE_MATCH, LAST_MODIFIED};
 use tokio::runtime::Handle;
 use tracing::debug;
 
+use crate::http::REQWEST_CLIENT;
+
 /// One request plus two retries, like upstream.
 const ATTEMPTS: usize = 3;
 
 pub(super) struct Downloader {
-    client: reqwest::Client,
+    /// `None` means prek's shared client. It is only touched when a download happens,
+    /// because creating it loads TLS certificates, which would slow down local-only runs.
+    client: Option<reqwest::Client>,
     /// `None` when `--no-cache` is set.
     cache_dir: Option<PathBuf>,
     runtime: Handle,
@@ -37,7 +41,7 @@ const NOT_MODIFIED: u16 = 304;
 
 impl Downloader {
     pub(super) fn new(
-        client: reqwest::Client,
+        client: Option<reqwest::Client>,
         cache_dir: Option<PathBuf>,
         runtime: Handle,
     ) -> Self {
@@ -58,9 +62,13 @@ impl Downloader {
         let cached_etag = cache_file
             .as_ref()
             .and_then(|path| fs_err::read_to_string(etag_path(path)).ok());
+        let client = match &self.client {
+            Some(client) => client.clone(),
+            None => REQWEST_CLIENT.clone(),
+        };
         let mut last_error = String::new();
         for _ in 0..ATTEMPTS {
-            let request = fetch(&self.client, url, cached_etag.as_deref());
+            let request = fetch(&client, url, cached_etag.as_deref());
             let response = match self.runtime.block_on(request) {
                 Ok(response) => response,
                 Err(err) => {

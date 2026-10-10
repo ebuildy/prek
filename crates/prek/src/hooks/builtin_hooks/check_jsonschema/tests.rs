@@ -44,7 +44,7 @@ impl Env {
         Context {
             base: self.dir.path().to_path_buf(),
             cache_dir: self.cache_dir(),
-            client: reqwest::Client::new(),
+            client: Some(reqwest::Client::new()),
         }
     }
 
