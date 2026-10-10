@@ -6,7 +6,7 @@ mod common;
 fn list_builtins_defaults_to_verbose_output() {
     let context = TestEnv::new();
 
-    cmd_snapshot!(context, context.command().arg("util").arg("list-builtins"), @r#"
+    cmd_snapshot!(context, context.command().arg("util").arg("list-builtins"), @"
     success: true
     exit_code: 0
     ----- stdout -----
@@ -39,7 +39,19 @@ fn list_builtins_defaults_to_verbose_output() {
     check-jsonschema
       Validates JSON, YAML and TOML files against a JSON Schema.
       flags:
-            --schemafile <PATH>  Path to a JSON Schema file (JSON or YAML), relative to the project root
+            --schemafile <PATH>
+                Path to a JSON Schema file, relative to the project root
+            --default-filetype <DEFAULT_FILETYPE>
+                File type used when the extension is not recognized [default: json] [possible values:
+                json, yaml, toml, json5]
+            --force-filetype <FORCE_FILETYPE>
+                File type used for every instance file, whatever its extension [possible values: json,
+                yaml, toml, json5]
+            --disable-formats <DISABLE_FORMATS>
+                Formats to stop checking, comma separated. `*` disables every format check [possible
+                values: *, date, date-time, duration, email, hostname, idn-email, idn-hostname, ipv4,
+                ipv6, iri, iri-reference, json-pointer, regex, relative-json-pointer, time, uri,
+                uri-reference, uri-template, uuid]
 
     check-merge-conflict
       Checks for files that contain merge conflict strings.
@@ -157,7 +169,7 @@ fn list_builtins_defaults_to_verbose_output() {
 
 
     ----- stderr -----
-    "#);
+    ");
 }
 
 #[test]

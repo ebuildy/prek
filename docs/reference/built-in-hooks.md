@@ -327,7 +327,11 @@ file is checked against it. All validation errors are reported per file, with th
 the failing value.
 
 The hook does not select any files by default. Set `files` (or `types`) to choose what to validate.
-The file format is detected from the extension (`.json`, `.yaml`, `.yml`, `.toml`).
+The file format is detected from the extension, like upstream check-jsonschema:
+`.json`, `.jsonld`, `.geojson` (JSON), `.yaml`, `.yml`, `.ymlld`, `.eyaml`, `.cff` (YAML),
+`.json5` and `.toml`. Other files use `--default-filetype`. YAML is read as YAML 1.2, so `yes`
+and `on` are strings, and unknown YAML tags are errors. TOML datetimes are validated as strings.
+Formats are checked in every draft, including 2019-09 and 2020-12.
 
 ```yaml
 repos:
@@ -341,11 +345,18 @@ repos:
 **Supported arguments**
 
 - `--schemafile <PATH>`
-    - Path to the JSON Schema (JSON or YAML), relative to the project root. Required.
+    - Path to the JSON Schema (JSON, YAML, TOML or JSON5), relative to the project root. Required.
+- `--default-filetype {json,yaml,toml,json5}`
+    - File type for files whose extension is not recognized. Default: `json`.
+- `--force-filetype {json,yaml,toml,json5}`
+    - File type for every file, whatever its extension.
+- `--disable-formats <FORMAT,...>`
+    - Format checks to turn off, comma separated and repeatable. `*` turns off all of them.
 
 **Caveats / differences**
 
 - Only local schema files are supported. Remote `$ref` resolution is disabled.
+- YAML numbers with a leading zero such as `017` are read as floats, and `.inf`/`.nan` are rejected.
 - This is not a drop-in replacement for [`check-jsonschema`](https://github.com/python-jsonschema/check-jsonschema).
 
 ---
