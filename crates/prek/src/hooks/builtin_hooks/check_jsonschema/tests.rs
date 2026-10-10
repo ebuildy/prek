@@ -1744,3 +1744,18 @@ async fn errors_report_line_numbers() {
         "{text}"
     );
 }
+
+/// Every bundled schema loads and compiles, so every upstream hook can run.
+#[tokio::test]
+async fn every_builtin_schema_compiles() {
+    let env = Env::new();
+    let doc = env.write("doc.json", "{}");
+    for name in super::catalog::builtin_schema_names() {
+        let run = env.run(&["--builtin-schema", &name, &doc]).await;
+        assert!(
+            !run.output.contains("Error:") && !run.output.contains("Failure resolving"),
+            "{name}: {}",
+            run.output
+        );
+    }
+}
