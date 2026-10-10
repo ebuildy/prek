@@ -1,0 +1,14 @@
+---
+version: 2
+plan:
+  project-key: PROJ
+  key: PLAN
+  name: My Plan
+stages:
+  - Default Stage:
+      jobs:
+        - Default Job
+Default Job:
+  tasks:
+    - script:
+        - echo hi
