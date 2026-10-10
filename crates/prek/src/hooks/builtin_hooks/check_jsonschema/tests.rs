@@ -1196,11 +1196,16 @@ async fn hook_examples() {
     let mut checked = 0;
     for (id, entry, _) in upstream_hooks() {
         let hook_name = id.trim_start_matches("check-");
-        for (category, expected) in [("positive", 0), ("negative", 1)] {
-            let dir = fixtures()
-                .join("example-files/hooks")
-                .join(category)
-                .join(hook_name);
+        // `example-files/hooks` is upstream's corpus. `parity` adds a passing and a failing
+        // file for hooks upstream does not cover, each verified against Python
+        // check-jsonschema (see the fixtures README).
+        for (root, category, expected) in [
+            ("example-files/hooks", "positive", 0),
+            ("example-files/hooks", "negative", 1),
+            ("parity", "positive", 0),
+            ("parity", "negative", 1),
+        ] {
+            let dir = fixtures().join(root).join(category).join(hook_name);
             let Ok(cases) = fs_err::read_dir(&dir) else {
                 continue;
             };
@@ -1229,12 +1234,12 @@ async fn hook_examples() {
                 args.push(&path_arg);
                 args.extend(add_args.iter().map(String::as_str));
                 let run = Env::new().run(&args).await;
-                assert_eq!(run.code, expected, "{id} {category}/{name}: {}", run.output);
+                assert_eq!(run.code, expected, "{id} {root}/{category}/{name}: {}", run.output);
                 checked += 1;
             }
         }
     }
-    assert!(checked >= 45, "only {checked} cases ran");
+    assert!(checked >= 70, "only {checked} cases ran");
 }
 
 #[tokio::test]
