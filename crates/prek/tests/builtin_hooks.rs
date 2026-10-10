@@ -3811,6 +3811,52 @@ fn check_jsonschema() {
 }
 
 #[test]
+fn check_jsonschema_filetypes_and_formats() {
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
+        repos:
+          - repo: builtin
+            hooks:
+              - id: check-jsonschema
+                files: ^config/
+                args: [--schemafile, schema.json]
+    "})
+        .with_file(
+            "schema.json",
+            indoc::indoc! {r#"
+        {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "enabled": {"type": "string"},
+                "contact": {"type": "string", "format": "email"},
+                "when": {"type": "string", "format": "date-time"}
+            }
+        }
+    "#},
+        )
+        .with_file("config/.renovaterc", r#"{"contact": "nope"}"#)
+        .with_file("config/a.yaml", "enabled: yes\n")
+        .with_file("config/b.toml", "when = 1979-05-27T07:32:00\n")
+        .with_file("config/c.json5", "{enabled: 'x', // comment\n}")
+        .init_git();
+
+    cmd_snapshot!(context, context.run(), @r#"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check jsonschema.........................................................Failed
+    - hook id: check-jsonschema
+    - description: Validates JSON, YAML and TOML files against a JSON Schema
+    - exit code: 1
+
+      config/.renovaterc: /contact: "nope" is not a "email"
+
+    ----- stderr -----
+    "#);
+}
+
+#[test]
 fn check_jsonc() {
     let context = TestEnv::new()
         .with_config(indoc::indoc! {r"
