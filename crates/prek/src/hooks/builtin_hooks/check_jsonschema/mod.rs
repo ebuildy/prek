@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use jsonschema::Validator;
+use serde_json::Value;
 
 use crate::hook::Hook;
 use crate::hooks::HookOutput;
@@ -13,6 +14,30 @@ use crate::hooks::pre_commit_hooks::{parse_hook_args, run_blocking_file_checks};
 use self::filetype::FileType;
 
 mod filetype;
+
+/// Format names upstream accepts in `--disable-formats`, plus `*` for all of them.
+const DISABLE_FORMATS_CHOICES: &[&str] = &[
+    "*",
+    "date",
+    "date-time",
+    "duration",
+    "email",
+    "hostname",
+    "idn-email",
+    "idn-hostname",
+    "ipv4",
+    "ipv6",
+    "iri",
+    "iri-reference",
+    "json-pointer",
+    "regex",
+    "relative-json-pointer",
+    "time",
+    "uri",
+    "uri-reference",
+    "uri-template",
+    "uuid",
+];
 
 #[derive(Parser)]
 #[command(disable_help_subcommand = true)]
@@ -28,6 +53,13 @@ pub(crate) struct Args {
     /// File type used for every instance file, whatever its extension.
     #[arg(long, value_enum)]
     force_filetype: Option<FileType>,
+    /// Formats to stop checking, comma separated. `*` disables every format check.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_parser = clap::builder::PossibleValuesParser::new(DISABLE_FORMATS_CHOICES),
+    )]
+    disable_formats: Vec<String>,
     #[arg(value_name = "FILENAMES")]
     filenames: Vec<PathBuf>,
 }
@@ -36,7 +68,10 @@ pub(crate) struct Args {
 pub(crate) async fn run(hook: &Hook, filenames: &[&Path]) -> Result<HookOutput> {
     let args: Args = parse_hook_args(hook)?;
     let file_base = hook.project().relative_path();
-    let validator = Arc::new(compile_schema(&file_base.join(&args.schemafile))?);
+    let validator = Arc::new(compile_schema(
+        &file_base.join(&args.schemafile),
+        &args.disable_formats,
+    )?);
     let default_filetype = args.default_filetype;
     let force_filetype = args.force_filetype;
 
@@ -56,14 +91,26 @@ pub(crate) async fn run(hook: &Hook, filenames: &[&Path]) -> Result<HookOutput> 
 }
 
 /// Compiles the schema once so every checked file reuses it.
-fn compile_schema(path: &Path) -> Result<Validator> {
+fn compile_schema(path: &Path, disable_formats: &[String]) -> Result<Validator> {
     let content = fs_err::read_to_string(path)?;
     let schema = FileType::detect(path, FileType::Json)
         .parse(&content)
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("Failed to parse schema file `{}`", path.display()))?;
-    jsonschema::validator_for(&schema)
+    build_validator(&schema, disable_formats)
         .with_context(|| format!("Invalid JSON Schema in `{}`", path.display()))
+}
+
+/// Upstream always passes a format checker, so formats are assertions in every draft,
+/// including 2019-09 and 2020-12 where the spec makes them annotations by default.
+/// A disabled format is replaced by a check that accepts everything.
+fn build_validator(schema: &Value, disable_formats: &[String]) -> Result<Validator> {
+    let check_formats = !disable_formats.iter().any(|name| name == "*");
+    let mut options = jsonschema::options().should_validate_formats(check_formats);
+    for name in disable_formats {
+        options = options.with_format(name.clone(), |_: &str| true);
+    }
+    Ok(options.build(schema)?)
 }
 
 fn check_file(
@@ -151,6 +198,59 @@ mod tests {
     #[test]
     fn yaml_1_1_words_are_strings() {
         assert_eq!(check("a.yaml", "name: yes\n").exit_status, 0);
+    }
+
+    fn email_schema(draft: &str) -> serde_json::Value {
+        serde_json::json!({"$schema": draft, "format": "email"})
+    }
+
+    #[test]
+    fn formats_are_checked_for_every_draft() {
+        for draft in [
+            "http://json-schema.org/draft-07/schema#",
+            "https://json-schema.org/draft/2019-09/schema",
+            "https://json-schema.org/draft/2020-12/schema",
+        ] {
+            let validator = build_validator(&email_schema(draft), &[]).unwrap();
+            assert!(
+                !validator.is_valid(&serde_json::json!("not-an-email")),
+                "{draft}"
+            );
+        }
+    }
+
+    #[test]
+    fn disable_formats() {
+        let schema = email_schema("https://json-schema.org/draft/2020-12/schema");
+        let disabled = build_validator(&schema, &["email".to_string()]).unwrap();
+        assert!(disabled.is_valid(&serde_json::json!("not-an-email")));
+        let all = build_validator(&schema, &["*".to_string()]).unwrap();
+        assert!(all.is_valid(&serde_json::json!("not-an-email")));
+    }
+
+    #[test]
+    fn disable_formats_accepts_lists_and_rejects_unknown_names() {
+        let args = Args::try_parse_from([
+            "check-jsonschema",
+            "--schemafile",
+            "s.json",
+            "--disable-formats",
+            "email,uuid",
+            "--disable-formats",
+            "regex",
+        ])
+        .unwrap();
+        assert_eq!(args.disable_formats, ["email", "uuid", "regex"]);
+        assert!(
+            Args::try_parse_from([
+                "check-jsonschema",
+                "--schemafile",
+                "s.json",
+                "--disable-formats",
+                "nope",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
