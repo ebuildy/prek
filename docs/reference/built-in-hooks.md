@@ -42,7 +42,7 @@ For `repo: builtin`, the following hooks are supported:
 
 ## Automatic Fast Path
 
-Currently, only part of hooks from `https://github.com/pre-commit/pre-commit-hooks` is supported. More popular repositories may be added over time.
+Currently, part of the hooks from `https://github.com/pre-commit/pre-commit-hooks` and all hooks from `https://github.com/python-jsonschema/check-jsonschema` are supported. More popular repositories may be added over time.
 
 - [`trailing-whitespace`](https://github.com/pre-commit/pre-commit-hooks#trailing-whitespace) (Trims trailing whitespace.)
 - [`check-added-large-files`](https://github.com/pre-commit/pre-commit-hooks#check-added-large-files) (Prevents giant files from being committed.)
@@ -66,6 +66,11 @@ Currently, only part of hooks from `https://github.com/pre-commit/pre-commit-hoo
 - [`no-commit-to-branch`](https://github.com/pre-commit/pre-commit-hooks#no-commit-to-branch) (Protects specific branches from direct commits.)
 - [`check-shebang-scripts-are-executable`](https://github.com/pre-commit/pre-commit-hooks#check-shebang-scripts-are-executable) (Ensures that (non-binary) files with a shebang are executable.)
 - [`check-executables-have-shebangs`](https://github.com/pre-commit/pre-commit-hooks#check-executables-have-shebangs) (Ensures that (non-binary) executables have a shebang.)
+
+All 29 hooks from `https://github.com/python-jsonschema/check-jsonschema` (`check-jsonschema`,
+`check-metaschema`, `check-github-workflows`, `check-renovate`, `check-gitlab-ci`, ...) run with
+the [`check-jsonschema`](#check-jsonschema) implementation. Their `entry`, `files` and `types`
+still come from the pinned upstream revision, and no Python environment is installed for them.
 
 ### Notes
 
@@ -322,16 +327,12 @@ repos:
 
 ### `check-jsonschema`
 
-Validates JSON, YAML and TOML files against a JSON Schema. The schema is compiled once and every
-file is checked against it. All validation errors are reported per file, with the JSON Pointer of
-the failing value.
+A Rust port of [check-jsonschema](https://github.com/python-jsonschema/check-jsonschema).
+It validates JSON, YAML, TOML and JSON5 files against a JSON Schema and accepts the upstream
+command-line options, so upstream hooks run unchanged through the [fast path](#automatic-fast-path).
+The schema is compiled once and every file is checked against it.
 
 The hook does not select any files by default. Set `files` (or `types`) to choose what to validate.
-The file format is detected from the extension, like upstream check-jsonschema:
-`.json`, `.jsonld`, `.geojson` (JSON), `.yaml`, `.yml`, `.ymlld`, `.eyaml`, `.cff` (YAML),
-`.json5` and `.toml`. Other files use `--default-filetype`. YAML is read as YAML 1.2, so `yes`
-and `on` are strings, and unknown YAML tags are errors. TOML datetimes are validated as strings.
-Formats are checked in every draft, including 2019-09 and 2020-12.
 
 ```yaml
 repos:
@@ -340,24 +341,57 @@ repos:
       - id: check-jsonschema
         files: '^config/.*\.ya?ml$'
         args: [--schemafile, schemas/config.schema.json]
+      - id: check-jsonschema
+        name: Validate GitHub workflows
+        files: '^\.github/workflows/[^/]+$'
+        args: [--builtin-schema, vendor.github-workflows]
 ```
+
+**Behavior shared with upstream**
+
+- File types come from the extension, case-sensitively: `.json`, `.jsonld`, `.geojson` (JSON),
+  `.yaml`, `.yml`, `.ymlld`, `.eyaml`, `.cff` (YAML), `.json5` and `.toml`. Other files use
+  `--default-filetype`.
+- YAML is read as YAML 1.2 (`yes` and `on` are strings), unknown tags are errors, and
+  timestamps stay strings. TOML datetimes become strings, with `Z` added when there is no offset.
+- Only the formats upstream checks with its default dependencies are enforced: `date`,
+  `date-time`, `time`, `email` and `idn-email` (an `@` check), `idn-hostname`, `ipv4`, `ipv6`,
+  `regex` and `uuid`, in every draft. Other formats such as `uri` or `hostname` are not checked.
+- `$ref` to local files and HTTP(S) URLs is resolved, in JSON, YAML, TOML or JSON5.
+- Downloads are retried twice and cached in prek's cache directory, keyed by URL. A cached file
+  is reused unless the server's `Last-Modified` is newer.
+- A schema that cannot be loaded fails this hook only.
 
 **Supported arguments**
 
-- `--schemafile <PATH>`
-    - Path to the JSON Schema (JSON, YAML, TOML or JSON5), relative to the project root. Required.
-- `--default-filetype {json,yaml,toml,json5}`
-    - File type for files whose extension is not recognized. Default: `json`.
-- `--force-filetype {json,yaml,toml,json5}`
-    - File type for every file, whatever its extension.
-- `--disable-formats <FORMAT,...>`
-    - Format checks to turn off, comma separated and repeatable. `*` turns off all of them.
+- `--schemafile <PATH|URI>`: local path (relative to the project root, `~` and `file://` work)
+  or HTTP(S) URL of the schema.
+- `--builtin-schema <NAME>`: a schema bundled with upstream, such as `vendor.github-workflows`
+  or `custom.github-workflows-require-timeout`.
+- `--check-metaschema`: validate each file as a schema against the metaschema of its `$schema`.
+- `--base-uri <URI>`: override the schema `$id`.
+- `--no-cache`: always download remote schemas.
+- `--disable-formats <FORMAT,...>`: format checks to turn off, comma separated and repeatable.
+  `*` turns off all of them.
+- `--regex-variant {default,nonunicode,python}` (and the legacy `--format-regex`).
+- `--default-filetype {json,yaml,toml,json5}` (default `json`) and `--force-filetype`.
+- `--data-transform {azure-pipelines,gitlab-ci}`.
+- `--fill-defaults`: fill `default` values of `properties` before validating.
+- `-o/--output-format {text,json}`, `-v/--verbose`, `-q/--quiet`.
+- `--traceback-mode`, `--cache-filename` and `--color` are accepted and ignored.
 
 **Caveats / differences**
 
-- Only local schema files are supported. Remote `$ref` resolution is disabled.
-- YAML numbers with a leading zero such as `017` are read as floats, and `.inf`/`.nan` are rejected.
-- This is not a drop-in replacement for [`check-jsonschema`](https://github.com/python-jsonschema/check-jsonschema).
+- Errors are printed one per line with the JSON Pointer of the failing value, and error messages
+  come from the Rust `jsonschema` crate, so their wording differs from upstream.
+- `--validator-class` and reading from stdin (`-`) are not supported.
+- `--regex-variant nonunicode` behaves like `default`, and `python` uses Rust regex syntax that
+  rejects JavaScript-only named groups.
+- `--check-metaschema` does not check Draft 3 documents.
+- YAML numbers with a leading zero such as `017` are read as floats. `.inf` and `.nan` are
+  validated as the largest finite number and `0`, which only matters for range keywords.
+  JSON files with `NaN` or `Infinity` are rejected.
+- `--fill-defaults` follows `properties`, `items` and `allOf`/`anyOf`/`oneOf`, not `$ref`.
 
 ---
 
