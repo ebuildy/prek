@@ -12,6 +12,7 @@ use super::formats;
 use super::retriever::{SchemaRetriever, SharedRetriever};
 use super::source::LoadedSchema;
 
+#[derive(Clone)]
 pub(super) struct Settings {
     pub(super) disable_formats: Vec<String>,
     pub(super) regex_variant: RegexVariant,
@@ -28,13 +29,14 @@ impl Settings {
     }
 }
 
-/// Compiles the schema. Upstream sets `$id` to `--base-uri`, and also registers the schema
-/// under its retrieval URI so a `$ref` back to that URI needs no request.
+/// Compiles the schema and returns it with the (shared) schema document. Upstream sets
+/// `$id` to `--base-uri`, and also registers the schema under its retrieval URI so a `$ref`
+/// back to that URI needs no request.
 pub(super) fn build(
     loaded: LoadedSchema,
     settings: &Settings,
     retriever: &Arc<SchemaRetriever>,
-) -> Result<Validator, String> {
+) -> Result<(Validator, Arc<Value>), String> {
     let LoadedSchema {
         mut schema,
         retrieval_uri,
@@ -43,6 +45,7 @@ pub(super) fn build(
         map.insert("$id".to_string(), Value::String(base_uri.clone()));
     }
     let has_id = schema.get("$id").is_some() || schema.get("id").is_some_and(Value::is_string);
+    let schema = Arc::new(schema);
     let mut options = settings
         .options()
         .with_retriever(SharedRetriever(retriever.clone()));
@@ -52,12 +55,13 @@ pub(super) fn build(
             options = options.with_base_uri(uri);
         }
     }
-    options.build(&schema).map_err(|err| match err.kind() {
+    let validator = options.build(&schema).map_err(|err| match err.kind() {
         ValidationErrorKind::Referencing(_) => {
             format!("Failure resolving $ref within schema\n  {err}")
         }
         _ => format!("Error: schemafile was not valid\n  {err}"),
-    })
+    })?;
+    Ok((validator, schema))
 }
 
 /// Validators for `--check-metaschema`, one per metaschema seen in this run.

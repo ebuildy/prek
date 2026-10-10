@@ -14,8 +14,9 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 pub(super) struct SchemaRetriever {
     downloader: Arc<Downloader>,
-    /// Resources already loaded in this run, keyed by URI without fragment.
-    loaded: Mutex<HashMap<String, Value>>,
+    /// Resources already loaded in this run, keyed by URI without fragment. They are shared
+    /// so registering a large schema does not copy it.
+    loaded: Mutex<HashMap<String, Arc<Value>>>,
 }
 
 impl SchemaRetriever {
@@ -28,7 +29,7 @@ impl SchemaRetriever {
 
     /// Registers a document under `uri`, so a `$ref` to it is served without a request.
     /// Upstream registers the main schema under its retrieval URI this way.
-    pub(super) fn preload(&self, uri: &str, value: Value) {
+    pub(super) fn preload(&self, uri: &str, value: Arc<Value>) {
         if let Ok(mut loaded) = self.loaded.lock() {
             loaded.insert(uri.to_string(), value);
         }
@@ -69,10 +70,10 @@ impl Retrieve for SchemaRetriever {
             .ok()
             .and_then(|loaded| loaded.get(uri).cloned())
         {
-            return Ok(value);
+            return Ok(Value::clone(&value));
         }
         let value = self.load(uri)?;
-        self.preload(uri, value.clone());
+        self.preload(uri, Arc::new(value.clone()));
         Ok(value)
     }
 }

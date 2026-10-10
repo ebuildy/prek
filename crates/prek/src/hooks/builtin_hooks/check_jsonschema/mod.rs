@@ -19,6 +19,7 @@ use crate::hooks::pre_commit_hooks::{hook_filenames, parse_hook_args};
 use crate::http::REQWEST_CLIENT;
 use crate::store::{CacheBucket, Store};
 
+use self::declared::DeclaredSchemas;
 use self::download::Downloader;
 use self::filetype::FileType;
 use self::report::{FileResult, Issue, Outcome, OutputFormat};
@@ -27,9 +28,11 @@ use self::transforms::DataTransform;
 use self::validator::{MetaValidators, Settings};
 
 mod catalog;
+mod declared;
 mod download;
 mod filetype;
 mod formats;
+mod locate;
 mod report;
 mod retriever;
 mod source;
@@ -95,6 +98,10 @@ pub(super) enum RegexVariant {
 #[command(disable_help_subcommand = true)]
 #[command(disable_version_flag = true)]
 #[command(disable_help_flag = true)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an upstream command-line flag"
+)]
 pub(crate) struct Args {
     /// Path or HTTP(S) URI of the JSON Schema. Relative paths are relative to the project root.
     #[arg(long, value_name = "PATH|URI")]
@@ -160,6 +167,11 @@ pub(crate) struct Args {
     /// Print nothing; only the exit code reports the result.
     #[arg(short = 'q', long, action = ArgAction::Count)]
     quiet: u8,
+    /// Validate each document against the schema it names with a `$schema` key or a
+    /// `# yaml-language-server: $schema=...` comment. `--schemafile` or `--builtin-schema`,
+    /// when given, applies to documents that name none.
+    #[arg(long)]
+    schema_from_instances: bool,
     #[arg(value_name = "FILENAMES")]
     filenames: Vec<PathBuf>,
 }
@@ -168,12 +180,17 @@ enum SchemaMode<'a> {
     File(&'a str),
     Builtin(&'a str),
     Metaschema,
+    /// Only `--schema-from-instances`, with no fallback schema.
+    Declared,
 }
 
 impl Args {
     fn schema_mode(&self) -> Result<SchemaMode<'_>> {
         if self.validator_class.is_some() {
             bail!("--validator-class is not supported by prek, it loads a Python class");
+        }
+        if self.schema_from_instances && self.check_metaschema {
+            bail!("--schema-from-instances and --check-metaschema are mutually exclusive");
         }
         let mode = match (
             self.schemafile.as_deref(),
@@ -183,6 +200,7 @@ impl Args {
             (Some(path), None, false) => SchemaMode::File(path),
             (None, Some(name), false) => SchemaMode::Builtin(name),
             (None, None, true) => SchemaMode::Metaschema,
+            (None, None, false) if self.schema_from_instances => SchemaMode::Declared,
             (None, None, false) => {
                 bail!(
                     "Either --schemafile, --builtin-schema, or --check-metaschema must be provided"
@@ -238,13 +256,21 @@ pub(super) async fn check(args: Args, context: Context, selected: &[&Path]) -> R
     tokio::task::spawn_blocking(move || check_blocking(&args, &context, runtime, &files)).await?
 }
 
-enum Schema {
-    Fixed {
-        validator: Validator,
-        /// The schema, kept for `--fill-defaults`.
-        defaults: Option<Value>,
-    },
-    Meta(MetaValidators),
+/// Chooses the validator for each document.
+struct Checker {
+    /// From `--schemafile` or `--builtin-schema`.
+    fixed: Option<Fixed>,
+    /// From `--check-metaschema`.
+    meta: Option<MetaValidators>,
+    /// From `--schema-from-instances`.
+    declared: Option<DeclaredSchemas>,
+    fill_defaults: bool,
+}
+
+struct Fixed {
+    validator: Validator,
+    /// The schema, kept for `--fill-defaults`.
+    schema: Arc<Value>,
 }
 
 fn check_blocking(
@@ -263,7 +289,7 @@ fn check_blocking(
     let downloader = Arc::new(Downloader::new(context.client.clone(), cache_dir, runtime));
 
     let loaded = match mode {
-        SchemaMode::Metaschema => None,
+        SchemaMode::Metaschema | SchemaMode::Declared => None,
         SchemaMode::File(schemafile) => Some(source::load_schemafile(
             schemafile,
             &context.base,
@@ -271,32 +297,38 @@ fn check_blocking(
         )),
         SchemaMode::Builtin(name) => Some(source::load_builtin(name)),
     };
-    let schema = match loaded {
-        None => Schema::Meta(MetaValidators::new(settings)),
+    let fixed = match loaded {
+        None => None,
         Some(Err(message)) => return Ok(failure(&message)),
         Some(Ok(loaded)) => {
-            let defaults = if args.fill_defaults {
-                Some(loaded.schema.clone())
-            } else {
-                None
-            };
-            let retriever = Arc::new(SchemaRetriever::new(downloader));
+            let retriever = Arc::new(SchemaRetriever::new(downloader.clone()));
             match validator::build(loaded, &settings, &retriever) {
-                Ok(validator) => Schema::Fixed {
-                    validator,
-                    defaults,
-                },
+                Ok((validator, schema)) => Some(Fixed { validator, schema }),
                 Err(message) => return Ok(failure(&message)),
             }
         }
     };
+    let checker = Checker {
+        fixed,
+        meta: if matches!(mode, SchemaMode::Metaschema) {
+            Some(MetaValidators::new(settings.clone()))
+        } else {
+            None
+        },
+        declared: if args.schema_from_instances {
+            Some(DeclaredSchemas::new(settings, downloader))
+        } else {
+            None
+        },
+        fill_defaults: args.fill_defaults,
+    };
 
     let results = files
         .par_iter()
-        .map(|file| check_file(&schema, args, &context.base.join(file), file))
+        .map(|file| checker.check_file(args, &context.base.join(file), file))
         .collect::<Result<Vec<_>, String>>();
     let results = match results {
-        Ok(results) => results,
+        Ok(results) => results.into_iter().flatten().collect::<Vec<_>>(),
         Err(message) => return Ok(failure(&message)),
     };
     let (exit_status, output) = report::render(&results, args.output_format, args.verbosity());
@@ -308,78 +340,147 @@ fn failure(message: &str) -> HookOutput {
     HookOutput::unchanged(1, format!("{message}\n").into_bytes())
 }
 
-fn check_file(
-    schema: &Schema,
-    args: &Args,
-    file_path: &Path,
-    display_path: &Path,
-) -> Result<FileResult, String> {
-    let path = display_path.display().to_string();
-    let content = fs_err::read(file_path).map_err(|err| err.to_string())?;
-    let file_type = match args.force_filetype {
-        Some(file_type) => file_type,
-        None => FileType::detect(display_path, args.default_filetype),
-    };
-    let mut instance = match load_instance(&content, file_type, args.data_transform) {
-        Ok(instance) => instance,
-        Err(message) => {
-            return Ok(FileResult {
+impl Checker {
+    /// Checks every document of a file. A file with several YAML documents reports each one
+    /// as `path (document N)` (upstream issues #222 and #561).
+    fn check_file(
+        &self,
+        args: &Args,
+        file_path: &Path,
+        display_path: &Path,
+    ) -> Result<Vec<FileResult>, String> {
+        let path = display_path.display().to_string();
+        let content = fs_err::read(file_path).map_err(|err| err.to_string())?;
+        let file_type = match args.force_filetype {
+            Some(file_type) => file_type,
+            None => FileType::detect(display_path, args.default_filetype),
+        };
+        let Ok(text) = simdutf8::compat::from_utf8(&content) else {
+            return Ok(vec![FileResult {
                 path,
-                outcome: Outcome::ParseError(message),
+                outcome: Outcome::ParseError("invalid UTF-8".to_string()),
+            }]);
+        };
+        let documents = match load_documents(text, file_type, args.data_transform) {
+            Ok(documents) => documents,
+            Err(message) => {
+                return Ok(vec![FileResult {
+                    path,
+                    outcome: Outcome::ParseError(message),
+                }]);
+            }
+        };
+        let modeline = if file_type == FileType::Yaml {
+            declared::yaml_modeline(text)
+        } else {
+            None
+        };
+        let base_dir = file_path.parent().unwrap_or(Path::new("."));
+        let several = documents.len() > 1;
+        let mut results = documents
+            .into_iter()
+            .enumerate()
+            .map(|(index, document)| {
+                let path = if several {
+                    format!("{path} (document {})", index + 1)
+                } else {
+                    path.clone()
+                };
+                let outcome = self.check_document(document, modeline, base_dir)?;
+                Ok(FileResult { path, outcome })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        add_lines(&mut results, text, file_type, args.data_transform);
+        Ok(results)
+    }
+
+    fn check_document(
+        &self,
+        mut document: Value,
+        modeline: Option<&str>,
+        base_dir: &Path,
+    ) -> Result<Outcome, String> {
+        if let Some(declared) = &self.declared
+            && let Some(location) = declared::declared_schema(&document, modeline)
+        {
+            return Ok(match declared.get(location, base_dir) {
+                Ok(validator) => validate(&validator, &document),
+                Err(message) => Outcome::SchemaError(message),
             });
         }
-    };
-    let meta_validator;
-    let validator = match schema {
-        Schema::Fixed {
-            validator,
-            defaults,
-        } => {
-            if let Some(defaults) = defaults {
-                validator::fill_defaults(defaults, &mut instance);
+        if let Some(fixed) = &self.fixed {
+            if self.fill_defaults {
+                validator::fill_defaults(&fixed.schema, &mut document);
             }
-            validator
+            return Ok(validate(&fixed.validator, &document));
         }
-        Schema::Meta(validators) => match validators.for_document(&instance)? {
-            Some(validator) => {
-                meta_validator = validator;
-                &*meta_validator
-            }
-            None => {
-                return Ok(FileResult {
-                    path,
-                    outcome: Outcome::Valid,
-                });
-            }
-        },
+        if let Some(meta) = &self.meta {
+            return Ok(match meta.for_document(&document)? {
+                Some(validator) => validate(&validator, &document),
+                None => Outcome::Valid,
+            });
+        }
+        Ok(Outcome::SchemaError(
+            "no schema declared: add a `$schema` key or a `# yaml-language-server: $schema=...` comment"
+                .to_string(),
+        ))
+    }
+}
+
+/// Adds source line numbers to validation errors (upstream issue #359). Only JSON and YAML
+/// files without a data transform are located, since a transform changes the structure.
+fn add_lines(
+    results: &mut [FileResult],
+    text: &str,
+    file_type: FileType,
+    transform: Option<DataTransform>,
+) {
+    let has_issues = results
+        .iter()
+        .any(|result| matches!(result.outcome, Outcome::Invalid(_)));
+    if !has_issues || transform.is_some() || !matches!(file_type, FileType::Json | FileType::Yaml) {
+        return;
+    }
+    let Some(lines) = locate::Lines::parse(text) else {
+        return;
     };
+    for (index, result) in results.iter_mut().enumerate() {
+        if let Outcome::Invalid(issues) = &mut result.outcome {
+            for issue in issues {
+                issue.line = lines.line(index, &issue.path);
+            }
+        }
+    }
+}
+
+fn validate(validator: &Validator, document: &Value) -> Outcome {
     let issues: Vec<Issue> = validator
-        .iter_errors(&instance)
+        .iter_errors(document)
         .map(|error| Issue::new(&error))
         .collect();
-    let outcome = if issues.is_empty() {
+    if issues.is_empty() {
         Outcome::Valid
     } else {
         Outcome::Invalid(issues)
-    };
-    Ok(FileResult { path, outcome })
+    }
 }
 
-fn load_instance(
-    content: &[u8],
+fn load_documents(
+    content: &str,
     file_type: FileType,
     transform: Option<DataTransform>,
-) -> Result<Value, String> {
-    let Ok(content) = simdutf8::compat::from_utf8(content) else {
-        return Err("invalid UTF-8".to_string());
-    };
+) -> Result<Vec<Value>, String> {
     let Some(transform) = transform else {
-        return file_type.parse(content);
+        return file_type.parse_documents(content);
     };
     let content = if file_type == FileType::Yaml {
         transform.preprocess(content)?
     } else {
         content.into()
     };
-    transform.apply(file_type.parse(&content)?)
+    file_type
+        .parse_documents(&content)?
+        .into_iter()
+        .map(|document| transform.apply(document))
+        .collect()
 }

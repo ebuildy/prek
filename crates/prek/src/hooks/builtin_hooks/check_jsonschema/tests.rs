@@ -856,7 +856,7 @@ async fn non_json_instance_mixed_with_valid_and_invalid_data() {
                     run.output
                 );
                 if with_bad {
-                    let expected = format!(r#"{bad}: /title: false is not of type "string""#);
+                    let expected = format!(r#"{bad}:1: /title: false is not of type "string""#);
                     assert!(run.output.contains(&expected), "{}", run.output);
                 }
                 continue;
@@ -1482,4 +1482,265 @@ fn hook_file_patterns_match_like_upstream() {
             );
         }
     }
+}
+
+// Upstream issues
+
+/// Issue #640: a `$ref` inside a referenced local file resolves against that file.
+#[tokio::test]
+async fn nested_local_refs() {
+    for passes in [true, false] {
+        let env = Env::new();
+        let main = env.write_json(
+            "schemas/main.json",
+            &json!({"properties": {"title": {"$ref": "./sub/a.json"}}}),
+        );
+        env.write_json("schemas/sub/a.json", &json!({"$ref": "./b.json"}));
+        env.write_json("schemas/sub/b.json", &json!({"type": "string"}));
+        let doc = env.write_json("doc.json", &title(passes));
+        let run = env.run(&["--schemafile", &main, &doc]).await;
+        assert_eq!(run.code, i32::from(!passes), "{}", run.output);
+    }
+}
+
+/// Issue #549: in Draft 7 an `$id` next to `$ref` is ignored, so the `urn:` indirection does
+/// not resolve (upstream fails the same way). The 2019-09 form works.
+#[tokio::test]
+async fn urn_ref_indirection() {
+    let schema = |draft: &str, defs: &str| {
+        json!({
+            "$schema": draft,
+            "$id": "urn:chart",
+            "type": "object",
+            "properties": {"someVal": {"$ref": "urn:chart/indirection"}},
+            defs: {
+                "indirection": {"$id": "urn:chart/indirection", "$ref": "urn:chart/string-type"},
+                "string": {"$id": "urn:chart/string-type", "type": "string"}
+            }
+        })
+    };
+    let env = Env::new();
+    let draft7 = env.write_json(
+        "draft7.json",
+        &schema("http://json-schema.org/draft-07/schema", "definitions"),
+    );
+    let draft2019 = env.write_json(
+        "draft2019.json",
+        &schema("https://json-schema.org/draft/2019-09/schema", "$defs"),
+    );
+    let good = env.write("good.yaml", "someVal: \"a string\"\n");
+    let bad = env.write("bad.yaml", "someVal: 3\n");
+
+    let run = env.run(&["--schemafile", &draft7, &good]).await;
+    assert_eq!(run.code, 1);
+    assert!(
+        run.output.contains("Failure resolving $ref"),
+        "{}",
+        run.output
+    );
+    assert_eq!(env.code(&["--schemafile", &draft2019, &good]).await, 0);
+    assert_eq!(env.code(&["--schemafile", &draft2019, &bad]).await, 1);
+}
+
+/// Issue #222: every document of a multi-document YAML file is validated.
+#[tokio::test]
+async fn multi_document_yaml() {
+    let env = Env::new();
+    let schema = env.write_json(
+        "schema.json",
+        &json!({"type": "object", "required": ["kind"]}),
+    );
+    let good = env.write("good.yaml", "---\nkind: System\n---\nkind: Component\n");
+    let bad = env.write("bad.yaml", "kind: System\n---\nname: no-kind\n");
+    let top_level_list = env.write("list.yaml", "- a\n- b\n");
+    assert_eq!(env.code(&["--schemafile", &schema, &good]).await, 0);
+    let run = env.run(&["--schemafile", &schema, &bad]).await;
+    assert_eq!(run.code, 1);
+    assert!(
+        run.output.contains(&format!(
+            "{bad} (document 2):3: /: \"kind\" is a required property"
+        )),
+        "{}",
+        run.output
+    );
+    assert!(!run.output.contains("document 1"), "{}", run.output);
+    let list_schema = env.write_json("list_schema.json", &json!({"type": "array"}));
+    assert_eq!(
+        env.code(&["--schemafile", &list_schema, &top_level_list])
+            .await,
+        0
+    );
+}
+
+/// Issue #561: a GitLab CI file with a `spec:inputs` header document.
+#[tokio::test]
+async fn gitlab_ci_spec_inputs_header() {
+    let env = Env::new();
+    let doc = env.write(
+        ".gitlab-ci.yml",
+        "spec:\n  inputs:\n    job-stage:\n      default: test\n---\nscan-website:\n  stage: $[[ inputs.job-stage ]]\n  script: ./scan-website\n",
+    );
+    let run = env
+        .run(&[
+            "--builtin-schema",
+            "vendor.gitlab-ci",
+            "--data-transform",
+            "gitlab-ci",
+            &doc,
+        ])
+        .await;
+    assert_eq!(run.code, 0, "{}", run.output);
+}
+
+/// Issues #310, #340 and #644: `--schema-from-instances`.
+#[tokio::test]
+async fn schema_from_instances() {
+    let env = Env::new();
+    env.write_json(
+        "schemas/title.json",
+        &json!({"properties": {"title": {"type": "string"}}}),
+    );
+    env.write_json(
+        "schemas/count.json",
+        &json!({"properties": {"count": {"type": "integer"}}}),
+    );
+    let by_key = env.write_json(
+        "data/a.json",
+        &json!({"$schema": "../schemas/title.json", "title": 2}),
+    );
+    let by_modeline = env.write(
+        "data/b.yaml",
+        "# yaml-language-server: $schema=../schemas/count.json\ncount: nope\n",
+    );
+    let valid = env.write(
+        "data/c.yaml",
+        "# yaml-language-server: $schema=../schemas/count.json\ncount: 3\n",
+    );
+    let undeclared = env.write_json("data/d.json", &json!({"title": 2}));
+    let missing_schema = env.write_json("data/e.json", &json!({"$schema": "../schemas/nope.json"}));
+
+    assert_eq!(env.code(&["--schema-from-instances", &valid]).await, 0);
+    let run = env
+        .run(&[
+            "--schema-from-instances",
+            &by_key,
+            &by_modeline,
+            &undeclared,
+            &missing_schema,
+        ])
+        .await;
+    assert_eq!(run.code, 1);
+    for expected in [
+        format!("{by_key}:1: /title: 2 is not of type \"string\""),
+        format!("{by_modeline}:2: /count: \"nope\" is not of type \"integer\""),
+        format!("{undeclared}: no schema declared"),
+        format!("{missing_schema}: Error: schemafile could not be parsed"),
+    ] {
+        assert!(
+            run.output.contains(&expected),
+            "missing `{expected}` in:\n{}",
+            run.output
+        );
+    }
+
+    // `--schemafile` applies to documents that declare no schema.
+    let fallback = env.write_json(
+        "fallback.json",
+        &json!({"properties": {"title": {"type": "string"}}}),
+    );
+    let run = env
+        .run(&[
+            "--schema-from-instances",
+            "--schemafile",
+            &fallback,
+            &undeclared,
+            &valid,
+        ])
+        .await;
+    assert_eq!(run.code, 1);
+    assert!(
+        run.output.contains(&format!("{undeclared}:1: /title")),
+        "{}",
+        run.output
+    );
+    assert!(!run.output.contains("c.yaml"), "{}", run.output);
+}
+
+/// Issue #668: without `Last-Modified`, the `ETag` decides whether the cache is fresh.
+#[tokio::test]
+async fn etag_cache_validation() {
+    for (cached_etag, expect_cached) in [
+        (Some("\"v2\""), true),
+        (Some("\"v1\""), false),
+        (None, false),
+    ] {
+        let server = Server::start();
+        let env = Env::new();
+        let url = server.url("/schema1.json");
+        server.add_full(
+            "/schema1.json",
+            200,
+            r#"{"type": "string"}"#,
+            &[("ETag", "\"v2\"")],
+        );
+        env.inject_cache(&url, r#"{"type": "integer"}"#);
+        if let Some(etag) = cached_etag {
+            fs_err::write(format!("{}.etag", env.cache_path(&url).display()), etag).unwrap();
+        }
+        let instance = env.write("instance.json", "42");
+        let run = env.run(&["--schemafile", &url, &instance]).await;
+        assert_eq!(
+            run.code,
+            i32::from(!expect_cached),
+            "{cached_etag:?}: {}",
+            run.output
+        );
+        let saved =
+            fs_err::read_to_string(format!("{}.etag", env.cache_path(&url).display())).unwrap();
+        assert_eq!(saved, "\"v2\"");
+    }
+}
+
+#[tokio::test]
+async fn not_modified_reuses_cache() {
+    let server = Server::start();
+    let env = Env::new();
+    let url = server.url("/schema1.json");
+    server.add_full("/schema1.json", 304, "", &[("ETag", "\"v1\"")]);
+    env.inject_cache(&url, r#"{"type": "integer"}"#);
+    fs_err::write(format!("{}.etag", env.cache_path(&url).display()), "\"v1\"").unwrap();
+    let instance = env.write("instance.json", "42");
+    assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
+}
+
+/// Issue #359: errors report the line of the failing value.
+#[tokio::test]
+async fn errors_report_line_numbers() {
+    let env = Env::new();
+    let schema = env.write_json(
+        "schema.json",
+        &json!({"properties": {"jobs": {"items": {"properties": {"name": {"type": "string"}}}}}}),
+    );
+    let yaml = env.write("ci.yaml", "# header\njobs:\n  - name: a\n  - name: 3\n");
+    let json = env.write(
+        "ci.json",
+        "{\n  \"jobs\": [\n    {\"name\": \"a\"},\n    {\"name\": 3}\n  ]\n}\n",
+    );
+    let toml = env.write("ci.toml", "[[jobs]]\nname = 3\n");
+    let run = env
+        .run(&["-o", "json", "--schemafile", &schema, &yaml, &json, &toml])
+        .await;
+    let report: Value = serde_json::from_str(&run.output).unwrap();
+    let lines: Vec<&Value> = report["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|error| &error["line"])
+        .collect();
+    assert_eq!(lines, [&json!(4), &json!(4), &Value::Null]);
+    let text = env.run(&["--schemafile", &schema, &yaml]).await.output;
+    assert!(
+        text.starts_with(&format!("{yaml}:4: /jobs/1/name: 3 is not of type")),
+        "{text}"
+    );
 }
