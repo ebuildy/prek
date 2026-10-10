@@ -24,6 +24,10 @@ mod check_commit_trailers;
 mod check_json5;
 mod check_jsonc;
 mod check_jsonschema;
+
+pub(crate) use check_jsonschema::{
+    is_upstream_hook as is_upstream_check_jsonschema_hook, run as run_check_jsonschema,
+};
 mod check_signed_commit;
 mod pattern;
 
@@ -110,7 +114,7 @@ impl BuiltinHooks {
 
     pub(crate) async fn run(
         self,
-        _store: &Store,
+        store: &Store,
         hook: &Hook,
         filenames: &[&Path],
         reporter: &HookRunReporter,
@@ -129,7 +133,7 @@ impl BuiltinHooks {
             Self::CheckJson => Box::pin(check_json::run(hook, filenames)),
             Self::CheckJson5 => Box::pin(check_json5::check_json5(hook, filenames)),
             Self::CheckJsonc => Box::pin(check_jsonc::check_jsonc(hook, filenames)),
-            Self::CheckJsonschema => Box::pin(check_jsonschema::run(hook, filenames)),
+            Self::CheckJsonschema => Box::pin(check_jsonschema::run(store, hook, filenames)),
             Self::CheckMergeConflict => Box::pin(check_merge_conflict::run(hook, filenames)),
             Self::CheckShebangScriptsAreExecutable => {
                 Box::pin(check_shebang_scripts_are_executable::run(hook, filenames))
