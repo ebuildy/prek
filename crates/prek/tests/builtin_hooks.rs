@@ -3803,8 +3803,8 @@ fn check_jsonschema() {
     - description: Validates JSON, YAML and TOML files against a JSON Schema
     - exit code: 1
 
-      config/bad.yaml: /: "name" is a required property
-      config/bad.yaml: /port: "nope" is not of type "integer"
+      config/bad.yaml:1: /: "name" is a required property
+      config/bad.yaml:1: /port: "nope" is not of type "integer"
 
     ----- stderr -----
     "#);
@@ -3850,7 +3850,7 @@ fn check_jsonschema_filetypes_and_formats() {
     - description: Validates JSON, YAML and TOML files against a JSON Schema
     - exit code: 1
 
-      config/.renovaterc: /contact: "nope" is not a "email"
+      config/.renovaterc:1: /contact: "nope" is not a "email"
 
     ----- stderr -----
     "#);
@@ -3890,7 +3890,7 @@ fn check_jsonschema_fast_path() {
     - description: Validate GitHub Workflows against the schema provided by SchemaStore
     - exit code: 1
 
-      .github/workflows/bad.yml: /jobs/build: {"runs-on":"ubuntu-latest","steps":3} is not valid under any of the schemas listed in the 'oneOf' keyword
+      .github/workflows/bad.yml:3: /jobs/build: {"runs-on":"ubuntu-latest","steps":3} is not valid under any of the schemas listed in the 'oneOf' keyword
         Best match: /jobs/build: Additional properties are not allowed ('runs-on', 'steps' were unexpected)
         Best deep match: /jobs/build/steps: 3 is not of type "array"
         1 other errors were produced. Use '--verbose' to see all errors.
@@ -3899,7 +3899,7 @@ fn check_jsonschema_fast_path() {
     - description: Validate JSON Schema files against their matching metaschema
     - exit code: 1
 
-      schemas/bad.json: /type: "nope" is not valid under any of the schemas listed in the 'anyOf' keyword
+      schemas/bad.json:1: /type: "nope" is not valid under any of the schemas listed in the 'anyOf' keyword
         Best match: /type: "nope" is not one of "array", "boolean" or 5 other candidates
         1 other errors were produced. Use '--verbose' to see all errors.
 

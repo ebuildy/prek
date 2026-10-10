@@ -46,19 +46,41 @@ impl FileType {
         }
     }
 
+    /// Parses every document of a file. Only YAML can hold several (`---` separated); an
+    /// empty YAML file is one `null` document, like upstream.
+    pub(super) fn parse_documents(self, content: &str) -> Result<Vec<Value>, String> {
+        if self != Self::Yaml {
+            return Ok(vec![self.parse(content)?]);
+        }
+        let content = strip_bom(content);
+        let documents: Vec<Value> =
+            serde_saphyr::from_multiple_with_options(content, yaml_options())
+                .map_err(|err| err.to_string())?;
+        if documents.is_empty() {
+            return Ok(vec![Value::Null]);
+        }
+        Ok(documents
+            .into_iter()
+            .map(|mut document| {
+                yaml_numbers(&mut document);
+                document
+            })
+            .collect())
+    }
+
     pub(super) fn parse(self, content: &str) -> Result<Value, String> {
-        // Python's JSON and YAML loaders skip a UTF-8 byte order mark.
         let content = match self {
-            Self::Json | Self::Json5 | Self::Yaml => {
-                content.strip_prefix('\u{feff}').unwrap_or(content)
-            }
+            Self::Json | Self::Json5 | Self::Yaml => strip_bom(content),
             Self::Toml => content,
         };
         match self {
             Self::Json => serde_json::from_str(content).map_err(|err| err.to_string()),
             Self::Json5 => json5::from_str(content).map_err(|err| err.to_string()),
             Self::Yaml => serde_saphyr::from_str_with_options(content, yaml_options())
-                .map(yaml_numbers)
+                .map(|mut document| {
+                    yaml_numbers(&mut document);
+                    document
+                })
                 .map_err(|err| err.to_string()),
             Self::Toml => {
                 let table: toml::Table = toml::from_str(content).map_err(|err| err.to_string())?;
@@ -66,6 +88,11 @@ impl FileType {
             }
         }
     }
+}
+
+/// Python's JSON and YAML loaders skip a UTF-8 byte order mark.
+fn strip_bom(content: &str) -> &str {
+    content.strip_prefix('\u{feff}').unwrap_or(content)
 }
 
 /// Matches the ruamel.yaml safe loader used upstream. Only `true` and `false` are booleans
@@ -83,24 +110,22 @@ fn yaml_options() -> serde_saphyr::Options {
 /// Fixes up scalars that ruamel.yaml reads as floats but serde-saphyr leaves as strings:
 /// `.inf`/`.nan` (JSON cannot hold them, see [`non_finite_number`]) and floats with `_`
 /// digit separators such as `224_617.445_991_228`.
-fn yaml_numbers(value: Value) -> Value {
+fn yaml_numbers(value: &mut Value) {
     match value {
-        Value::String(text) => match text.as_str() {
-            ".inf" => non_finite_number(f64::INFINITY),
-            "-.inf" => non_finite_number(f64::NEG_INFINITY),
-            ".nan" => non_finite_number(f64::NAN),
-            _ => match underscored_float(&text) {
-                Some(number) => Value::from(number),
-                None => Value::String(text),
-            },
-        },
-        Value::Array(items) => Value::Array(items.into_iter().map(yaml_numbers).collect()),
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(key, value)| (key, yaml_numbers(value)))
-                .collect(),
-        ),
-        other => other,
+        Value::String(text) => {
+            let number = match text.as_str() {
+                ".inf" => Some(non_finite_number(f64::INFINITY)),
+                "-.inf" => Some(non_finite_number(f64::NEG_INFINITY)),
+                ".nan" => Some(non_finite_number(f64::NAN)),
+                _ => underscored_float(text).map(Value::from),
+            };
+            if let Some(number) = number {
+                *value = number;
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(yaml_numbers),
+        Value::Object(map) => map.values_mut().for_each(yaml_numbers),
+        _ => {}
     }
 }
 
@@ -287,6 +312,25 @@ mod tests {
         assert_eq!(
             parse(FileType::Toml, "a = inf\nb = nan\n"),
             serde_json::json!({"a": f64::MAX, "b": 0.0})
+        );
+    }
+
+    #[test]
+    fn yaml_documents() {
+        let parse = |content: &str| FileType::Yaml.parse_documents(content).unwrap();
+        assert_eq!(parse(""), vec![Value::Null]);
+        assert_eq!(parse("a: 1\n"), vec![serde_json::json!({"a": 1})]);
+        assert_eq!(parse("---\n- a\n"), vec![serde_json::json!(["a"])]);
+        assert_eq!(
+            parse("a: 1\n---\nb: .inf\n"),
+            vec![
+                serde_json::json!({"a": 1}),
+                serde_json::json!({"b": f64::MAX})
+            ]
+        );
+        assert_eq!(
+            FileType::Json.parse_documents("[1]").unwrap(),
+            vec![serde_json::json!([1])]
         );
     }
 

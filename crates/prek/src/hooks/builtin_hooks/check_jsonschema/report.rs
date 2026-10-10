@@ -22,6 +22,8 @@ pub(super) struct FileResult {
 pub(super) enum Outcome {
     Valid,
     ParseError(String),
+    /// The schema a document declared could not be loaded or compiled.
+    SchemaError(String),
     Invalid(Vec<Issue>),
 }
 
@@ -36,6 +38,10 @@ pub(super) struct ErrorLocation {
 
 pub(super) struct Issue {
     error: ErrorLocation,
+    /// Instance path segments, used to find `line`.
+    pub(super) path: Vec<String>,
+    /// Line of the failing value in the source file, when it can be found.
+    pub(super) line: Option<usize>,
     /// Errors under `anyOf`/`oneOf`, flattened depth first like upstream.
     sub_errors: Vec<ErrorLocation>,
 }
@@ -44,8 +50,18 @@ impl Issue {
     pub(super) fn new(error: &ValidationError<'_>) -> Self {
         let mut sub_errors = Vec::new();
         collect_sub_errors(error, &mut sub_errors);
+        let path = error
+            .instance_path()
+            .iter()
+            .map(|segment| match segment {
+                LocationSegment::Index(index) => index.to_string(),
+                LocationSegment::Property(name) => name.into_owned(),
+            })
+            .collect();
         Self {
             error: ErrorLocation::new(error),
+            path,
+            line: None,
             sub_errors,
         }
     }
@@ -155,10 +171,17 @@ fn render_text(results: &[FileResult], verbosity: i32) -> String {
             Outcome::ParseError(message) => {
                 let _ = writeln!(out, "{path}: Failed to parse ({message})");
             }
+            Outcome::SchemaError(message) => {
+                let _ = writeln!(out, "{path}: {message}");
+            }
             Outcome::Invalid(issues) => {
                 for issue in issues {
                     let error = &issue.error;
-                    let _ = writeln!(out, "{path}: {}: {}", error.pointer, error.message);
+                    let location = match issue.line {
+                        Some(line) => format!("{path}:{line}"),
+                        None => path.clone(),
+                    };
+                    let _ = writeln!(out, "{location}: {}: {}", error.pointer, error.message);
                     render_sub_errors(&mut out, issue, verbosity);
                 }
             }
@@ -220,6 +243,10 @@ fn render_json(results: &[FileResult], failed: bool, verbosity: i32) -> String {
                         "filename": result.path,
                         "message": format!("Failed to parse {}: {message}", result.path),
                     })),
+                    Outcome::SchemaError(message) => parse_errors.push(json!({
+                        "filename": result.path,
+                        "message": message,
+                    })),
                     Outcome::Invalid(issues) => {
                         for issue in issues {
                             errors.push(json_issue(&result.path, issue, verbosity));
@@ -250,6 +277,9 @@ fn json_issue(filename: &str, issue: &Issue, verbosity: i32) -> Value {
     item.insert("filename".into(), json!(filename));
     item.insert("path".into(), json!(error.json_path));
     item.insert("message".into(), json!(error.message));
+    if let Some(line) = issue.line {
+        item.insert("line".into(), json!(line));
+    }
     item.insert("has_sub_errors".into(), json!(!issue.sub_errors.is_empty()));
     if let (Some(best), Some(deep)) = (issue.best_match(), issue.best_deep_match()) {
         item.insert(

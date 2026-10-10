@@ -39,19 +39,45 @@ fn list_builtins_defaults_to_verbose_output() {
     check-jsonschema
       Validates JSON, YAML and TOML files against a JSON Schema.
       flags:
-            --schemafile <PATH>
-                Path to a JSON Schema file, relative to the project root
+            --schemafile <PATH|URI>
+                Path or HTTP(S) URI of the JSON Schema. Relative paths are relative to the project root
+            --base-uri <BASE_URI>
+                Override the base URI (`$id`) of the schema
+            --builtin-schema <BUILTIN_SCHEMA_NAME>
+                Name of a schema bundled with check-jsonschema, such as `vendor.github-workflows`
+            --check-metaschema
+                Validate each file as a schema, against the metaschema named by its `$schema`
+            --no-cache
+                Always download remote schemas, and do not write the cache
+            --disable-formats <DISABLE_FORMATS>
+                Formats to stop checking, comma separated. `*` disables every format check [possible
+                values: *, date, date-time, duration, email, hostname, idn-email, idn-hostname, ipv4,
+                ipv6, iri, iri-reference, json-pointer, regex, relative-json-pointer, time, uri,
+                uri-reference, uri-template, uuid]
+            --regex-variant <REGEX_VARIANT>
+                Regex dialect for `pattern` and the `regex` format [possible values: default, nonunicode,
+                python]
             --default-filetype <DEFAULT_FILETYPE>
                 File type used when the extension is not recognized [default: json] [possible values:
                 json, yaml, toml, json5]
             --force-filetype <FORCE_FILETYPE>
                 File type used for every instance file, whatever its extension [possible values: json,
                 yaml, toml, json5]
-            --disable-formats <DISABLE_FORMATS>
-                Formats to stop checking, comma separated. `*` disables every format check [possible
-                values: *, date, date-time, duration, email, hostname, idn-email, idn-hostname, ipv4,
-                ipv6, iri, iri-reference, json-pointer, regex, relative-json-pointer, time, uri,
-                uri-reference, uri-template, uuid]
+            --data-transform <DATA_TRANSFORM>
+                Transform applied to each file before validation [possible values: azure-pipelines,
+                gitlab-ci]
+            --fill-defaults
+                Fill in `default` values from the schema before validating
+        -o, --output-format <OUTPUT_FORMAT>
+                Output format [default: text] [possible values: text, json]
+        -v, --verbose...
+                Show every error under `anyOf` and `oneOf`
+        -q, --quiet...
+                Print nothing; only the exit code reports the result
+            --schema-from-instances
+                Validate each document against the schema it names with a `$schema` key or a `#
+                yaml-language-server: $schema=...` comment. `--schemafile` or `--builtin-schema`, when
+                given, applies to documents that name none
 
     check-merge-conflict
       Checks for files that contain merge conflict strings.

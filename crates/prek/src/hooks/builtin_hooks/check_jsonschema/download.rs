@@ -1,15 +1,17 @@
 //! Remote schema downloads with an on-disk cache, ported from upstream `cachedownloader.py`.
 //!
 //! Every lookup sends a GET. The cached copy is used when its mtime is at least the
-//! response's `Last-Modified` (a missing or malformed header counts as the epoch, so an
-//! existing cache file always wins). Otherwise the body must parse before it is cached;
-//! a body that does not parse is retried like a failed request.
+//! response's `Last-Modified`. Without that header, prek compares the response's `ETag`
+//! with the one saved next to the cache file and sends it as `If-None-Match`, so a `304`
+//! also reuses the cache (upstream issue #668). With neither header, an existing cache file
+//! always wins, like upstream. A fresh body must parse before it is cached; a body that
+//! does not parse is retried like a failed request.
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use aws_lc_rs::digest::{SHA256, digest};
-use reqwest::header::LAST_MODIFIED;
+use reqwest::header::{ETAG, IF_NONE_MATCH, LAST_MODIFIED};
 use tokio::runtime::Handle;
 use tracing::debug;
 
@@ -26,8 +28,12 @@ pub(super) struct Downloader {
 struct Response {
     status: u16,
     last_modified: Option<String>,
+    etag: Option<String>,
     body: Vec<u8>,
 }
+
+/// HTTP 304: the cached copy matches the `If-None-Match` `ETag`.
+const NOT_MODIFIED: u16 = 304;
 
 impl Downloader {
     pub(super) fn new(
@@ -49,15 +55,25 @@ impl Downloader {
             .cache_dir
             .as_ref()
             .map(|dir| dir.join(cache_filename(url)));
+        let cached_etag = cache_file
+            .as_ref()
+            .and_then(|path| fs_err::read_to_string(etag_path(path)).ok());
         let mut last_error = String::new();
         for _ in 0..ATTEMPTS {
-            let response = match self.runtime.block_on(fetch(&self.client, url)) {
+            let request = fetch(&self.client, url, cached_etag.as_deref());
+            let response = match self.runtime.block_on(request) {
                 Ok(response) => response,
                 Err(err) => {
                     last_error = format!("encountered error during download: {err}");
                     continue;
                 }
             };
+            if response.status == NOT_MODIFIED
+                && let Some(path) = &cache_file
+                && let Ok(content) = fs_err::read(path)
+            {
+                return Ok(content);
+            }
             if !(200..300).contains(&response.status) {
                 last_error = format!(
                     "got response with status={}, retries exhausted",
@@ -66,7 +82,7 @@ impl Downloader {
                 continue;
             }
             if let Some(path) = &cache_file
-                && is_cache_hit(path, response.last_modified.as_deref())
+                && is_cache_hit(path, &response, cached_etag.as_deref())
                 && let Ok(content) = fs_err::read(path)
             {
                 return Ok(content);
@@ -76,7 +92,7 @@ impl Downloader {
                 continue;
             }
             if let Some(path) = &cache_file
-                && let Err(err) = write_atomic(path, &response.body)
+                && let Err(err) = store(path, &response)
             {
                 debug!("Failed to cache `{url}` at `{}`: {err}", path.display());
             }
@@ -86,20 +102,51 @@ impl Downloader {
     }
 }
 
-async fn fetch(client: &reqwest::Client, url: &str) -> reqwest::Result<Response> {
-    let response = client.get(url).send().await?;
+async fn fetch(
+    client: &reqwest::Client,
+    url: &str,
+    etag: Option<&str>,
+) -> reqwest::Result<Response> {
+    let mut request = client.get(url);
+    if let Some(etag) = etag {
+        request = request.header(IF_NONE_MATCH, etag);
+    }
+    let response = request.send().await?;
     let status = response.status().as_u16();
-    let last_modified = response
-        .headers()
-        .get(LAST_MODIFIED)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let header = |name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    let last_modified = header(LAST_MODIFIED);
+    let etag = header(ETAG);
     let body = response.bytes().await?.to_vec();
     Ok(Response {
         status,
         last_modified,
+        etag,
         body,
     })
+}
+
+/// The `ETag` of a cache file is saved next to it.
+fn etag_path(cache_file: &Path) -> PathBuf {
+    let mut name = cache_file.as_os_str().to_owned();
+    name.push(".etag");
+    PathBuf::from(name)
+}
+
+fn store(path: &Path, response: &Response) -> std::io::Result<()> {
+    write_atomic(path, &response.body)?;
+    match &response.etag {
+        Some(etag) => write_atomic(&etag_path(path), etag.as_bytes()),
+        None => match fs_err::remove_file(etag_path(path)) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
+            _ => Ok(()),
+        },
+    }
 }
 
 /// sha256 of the URL, plus the extension of its last path segment when it has one.
@@ -112,15 +159,20 @@ pub(super) fn cache_filename(url: &str) -> String {
     }
 }
 
-fn is_cache_hit(path: &Path, last_modified: Option<&str>) -> bool {
+fn is_cache_hit(path: &Path, response: &Response, cached_etag: Option<&str>) -> bool {
     let Ok(modified) = fs_err::metadata(path).and_then(|meta| meta.modified()) else {
         return false;
     };
-    let local = modified
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    let remote = last_modified.and_then(parse_http_date).unwrap_or(0);
-    local >= remote
+    if let Some(remote) = response.last_modified.as_deref().and_then(parse_http_date) {
+        let local = modified
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
+        return local >= remote;
+    }
+    match &response.etag {
+        Some(etag) => cached_etag == Some(etag.as_str()),
+        None => true,
+    }
 }
 
 /// Writes through a temporary file in the cache directory, so concurrent hooks never read

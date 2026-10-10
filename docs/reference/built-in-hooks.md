@@ -362,6 +362,18 @@ repos:
   is reused unless the server's `Last-Modified` is newer.
 - A schema that cannot be loaded fails this hook only.
 
+**Additions over upstream** (from upstream feature requests)
+
+- Every document of a multi-document YAML file is validated, and errors name the document,
+  such as `ci.yml (document 2)` (upstream #222, #561).
+- Errors in JSON and YAML files include the line of the failing value, such as
+  `ci.yml:12: /jobs/build: ...` (upstream #359). `-o json` adds a `line` field.
+- `--schema-from-instances` validates each document against the schema it names, with a
+  top-level `$schema` key or a `# yaml-language-server: $schema=...` comment. Relative locations
+  resolve against the file's directory. `--schemafile` or `--builtin-schema`, if also given,
+  applies to documents that name no schema (upstream #310, #340, #644).
+- Without `Last-Modified`, the cache is validated with the server's `ETag` (upstream #668).
+
 **Supported arguments**
 
 - `--schemafile <PATH|URI>`: local path (relative to the project root, `~` and `file://` work)
@@ -377,13 +389,14 @@ repos:
 - `--default-filetype {json,yaml,toml,json5}` (default `json`) and `--force-filetype`.
 - `--data-transform {azure-pipelines,gitlab-ci}`.
 - `--fill-defaults`: fill `default` values of `properties` before validating.
+- `--schema-from-instances`: see above.
 - `-o/--output-format {text,json}`, `-v/--verbose`, `-q/--quiet`.
 - `--traceback-mode`, `--cache-filename` and `--color` are accepted and ignored.
 
 **Caveats / differences**
 
-- Errors are printed one per line with the JSON Pointer of the failing value, and error messages
-  come from the Rust `jsonschema` crate, so their wording differs from upstream.
+- Errors are printed one per line as `path:line: pointer: message`, and error messages come from
+  the Rust `jsonschema` crate, so their wording differs from upstream.
 - `--validator-class` and reading from stdin (`-`) are not supported.
 - `--regex-variant nonunicode` behaves like `default`, and `python` uses Rust regex syntax that
   rejects JavaScript-only named groups.
