@@ -16,7 +16,6 @@ use tokio::runtime::Handle;
 use crate::hook::Hook;
 use crate::hooks::HookOutput;
 use crate::hooks::pre_commit_hooks::{hook_filenames, parse_hook_args};
-use crate::http::REQWEST_CLIENT;
 use crate::store::{CacheBucket, Store};
 
 use self::declared::DeclaredSchemas;
@@ -229,11 +228,12 @@ impl Args {
     }
 }
 
-/// Where the hook runs: paths are relative to `base`, downloads use `client` and `cache_dir`.
+/// Where the hook runs: paths are relative to `base`, downloads use `client` (prek's shared
+/// client when `None`) and `cache_dir`.
 pub(super) struct Context {
     pub(super) base: PathBuf,
     pub(super) cache_dir: PathBuf,
-    pub(super) client: reqwest::Client,
+    pub(super) client: Option<reqwest::Client>,
 }
 
 /// Runs the `check-jsonschema` hook.
@@ -242,7 +242,7 @@ pub(crate) async fn run(store: &Store, hook: &Hook, filenames: &[&Path]) -> Resu
     let context = Context {
         base: hook.project().relative_path().to_path_buf(),
         cache_dir: store.cache_path(CacheBucket::CheckJsonschema),
-        client: REQWEST_CLIENT.clone(),
+        client: None,
     };
     check(args, context, filenames).await
 }
