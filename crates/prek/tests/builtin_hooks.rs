@@ -3856,6 +3856,61 @@ fn check_jsonschema_filetypes_and_formats() {
     "#);
 }
 
+/// Hooks from the upstream check-jsonschema repository run with the Rust implementation and
+/// install no Python environment.
+#[test]
+fn check_jsonschema_fast_path() {
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
+        repos:
+          - repo: https://github.com/python-jsonschema/check-jsonschema
+            rev: 0.37.1
+            hooks:
+              - id: check-github-workflows
+              - id: check-metaschema
+                files: ^schemas/
+    "})
+        .with_file(
+            ".github/workflows/ok.yml",
+            "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n",
+        )
+        .with_file(
+            ".github/workflows/bad.yml",
+            "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps: 3\n",
+        )
+        .with_file("schemas/bad.json", r#"{"type": "nope"}"#)
+        .init_git();
+
+    cmd_snapshot!(context, context.run(), @r#"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    Validate GitHub Workflows................................................Failed
+    - hook id: check-github-workflows
+    - description: Validate GitHub Workflows against the schema provided by SchemaStore
+    - exit code: 1
+
+      .github/workflows/bad.yml: /jobs/build: {"runs-on":"ubuntu-latest","steps":3} is not valid under any of the schemas listed in the 'oneOf' keyword
+        Best match: /jobs/build: Additional properties are not allowed ('runs-on', 'steps' were unexpected)
+        Best deep match: /jobs/build/steps: 3 is not of type "array"
+        1 other errors were produced. Use '--verbose' to see all errors.
+    Validate JSON Schema files...............................................Failed
+    - hook id: check-metaschema
+    - description: Validate JSON Schema files against their matching metaschema
+    - exit code: 1
+
+      schemas/bad.json: /type: "nope" is not valid under any of the schemas listed in the 'anyOf' keyword
+        Best match: /type: "nope" is not one of "array", "boolean" or 5 other candidates
+        1 other errors were produced. Use '--verbose' to see all errors.
+
+    ----- stderr -----
+    "#);
+
+    let hooks_dir = context.home_dir().child("hooks");
+    let installed = fs_err::read_dir(hooks_dir.path()).map_or(0, Iterator::count);
+    assert_eq!(installed, 0, "no hook environment should be installed");
+}
+
 #[test]
 fn check_jsonc() {
     let context = TestEnv::new()

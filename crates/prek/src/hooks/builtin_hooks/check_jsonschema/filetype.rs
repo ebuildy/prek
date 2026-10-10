@@ -12,26 +12,53 @@ pub(super) enum FileType {
 }
 
 impl FileType {
-    /// Picks the format from the extension, using the same map as upstream
+    /// Picks the format from the extension, using the same case-sensitive map as upstream
     /// `identify_filetype.py`. Files without a known extension use `default`.
     pub(super) fn detect(path: &Path, default: Self) -> Self {
-        let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
-            return default;
-        };
-        match extension.to_ascii_lowercase().as_str() {
-            "json" | "jsonld" | "geojson" => Self::Json,
-            "yaml" | "yml" | "ymlld" | "eyaml" | "cff" => Self::Yaml,
-            "json5" => Self::Json5,
-            "toml" => Self::Toml,
-            _ => default,
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(Self::from_extension)
+            .unwrap_or(default)
+    }
+
+    /// Upstream picks a downloaded schema's type from the text after the last `.` of the URL,
+    /// so `https://json.schemastore.org/github-workflow` falls back to `default`.
+    pub(super) fn detect_url(url: &str, default: Self) -> Self {
+        url.rsplit_once('.')
+            .and_then(|(_, extension)| Self::from_extension(extension))
+            .unwrap_or(default)
+    }
+
+    fn from_extension(extension: &str) -> Option<Self> {
+        match extension {
+            "json" | "jsonld" | "geojson" => Some(Self::Json),
+            "yaml" | "yml" | "ymlld" | "eyaml" | "cff" => Some(Self::Yaml),
+            "json5" => Some(Self::Json5),
+            "toml" => Some(Self::Toml),
+            _ => None,
+        }
+    }
+
+    pub(super) fn parse_bytes(self, content: &[u8]) -> Result<Value, String> {
+        match simdutf8::compat::from_utf8(content) {
+            Ok(content) => self.parse(content),
+            Err(_) => Err("invalid UTF-8".to_string()),
         }
     }
 
     pub(super) fn parse(self, content: &str) -> Result<Value, String> {
+        // Python's JSON and YAML loaders skip a UTF-8 byte order mark.
+        let content = match self {
+            Self::Json | Self::Json5 | Self::Yaml => {
+                content.strip_prefix('\u{feff}').unwrap_or(content)
+            }
+            Self::Toml => content,
+        };
         match self {
             Self::Json => serde_json::from_str(content).map_err(|err| err.to_string()),
             Self::Json5 => json5::from_str(content).map_err(|err| err.to_string()),
             Self::Yaml => serde_saphyr::from_str_with_options(content, yaml_options())
+                .map(yaml_numbers)
                 .map_err(|err| err.to_string()),
             Self::Toml => {
                 let table: toml::Table = toml::from_str(content).map_err(|err| err.to_string())?;
@@ -48,7 +75,62 @@ fn yaml_options() -> serde_saphyr::Options {
     let mut options = serde_saphyr::Options::default();
     options.strict_booleans = true;
     options.reject_unsupported_tags = true;
+    // Non-finite floats arrive as the strings `.inf`, `-.inf` and `.nan`, converted below.
+    options.reject_non_finite_typeless_float = false;
     options
+}
+
+/// Fixes up scalars that ruamel.yaml reads as floats but serde-saphyr leaves as strings:
+/// `.inf`/`.nan` (JSON cannot hold them, see [`non_finite_number`]) and floats with `_`
+/// digit separators such as `224_617.445_991_228`.
+fn yaml_numbers(value: Value) -> Value {
+    match value {
+        Value::String(text) => match text.as_str() {
+            ".inf" => non_finite_number(f64::INFINITY),
+            "-.inf" => non_finite_number(f64::NEG_INFINITY),
+            ".nan" => non_finite_number(f64::NAN),
+            _ => match underscored_float(&text) {
+                Some(number) => Value::from(number),
+                None => Value::String(text),
+            },
+        },
+        Value::Array(items) => Value::Array(items.into_iter().map(yaml_numbers).collect()),
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, yaml_numbers(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn underscored_float(text: &str) -> Option<f64> {
+    let is_float_text = text.contains('_')
+        && text.contains(['.', 'e', 'E'])
+        && text.starts_with(|c: char| c.is_ascii_digit() || matches!(c, '+' | '-' | '.'))
+        && text
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '_' | '.' | '+' | '-' | 'e' | 'E'));
+    if !is_float_text {
+        return None;
+    }
+    text.replace('_', "")
+        .parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite())
+}
+
+/// Infinity becomes the largest finite number of the same sign and NaN becomes 0, so
+/// `type: number` passes as it does upstream. Range keywords may differ for these values.
+fn non_finite_number(value: f64) -> Value {
+    let stand_in = if value.is_nan() {
+        0.0
+    } else if value.is_sign_positive() {
+        f64::MAX
+    } else {
+        f64::MIN
+    };
+    Value::from(stand_in)
 }
 
 /// Converts TOML to JSON. Upstream turns datetimes into ISO strings and adds a `Z` when a
@@ -59,7 +141,7 @@ fn toml_to_json(value: toml::Value) -> Result<Value, String> {
         toml::Value::Integer(i) => Value::from(i),
         toml::Value::Float(f) => match serde_json::Number::from_f64(f) {
             Some(number) => Value::Number(number),
-            None => return Err(format!("non-finite float `{f}` cannot be validated")),
+            None => non_finite_number(f),
         },
         toml::Value::Boolean(b) => Value::Bool(b),
         toml::Value::Datetime(datetime) => {
@@ -95,7 +177,8 @@ mod tests {
         assert_eq!(detect("a.jsonld"), FileType::Json);
         assert_eq!(detect("a.geojson"), FileType::Json);
         assert_eq!(detect("a.yaml"), FileType::Yaml);
-        assert_eq!(detect("a.YML"), FileType::Yaml);
+        // Upstream matches extensions case-sensitively.
+        assert_eq!(detect("a.YML"), FileType::Json);
         assert_eq!(detect("a.ymlld"), FileType::Yaml);
         assert_eq!(detect("a.eyaml"), FileType::Yaml);
         assert_eq!(detect("CITATION.cff"), FileType::Yaml);
@@ -117,6 +200,17 @@ mod tests {
             FileType::detect(Path::new("a.txt"), FileType::Toml),
             FileType::Toml
         );
+    }
+
+    #[test]
+    fn detects_url_types() {
+        let detect = |url: &str| FileType::detect_url(url, FileType::Json);
+        assert_eq!(detect("https://example.org/main.yaml"), FileType::Yaml);
+        assert_eq!(
+            detect("https://json.schemastore.org/github-workflow"),
+            FileType::Json
+        );
+        assert_eq!(detect("https://example.org/a.toml"), FileType::Toml);
     }
 
     fn parse(file_type: FileType, content: &str) -> Value {
@@ -178,10 +272,38 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_floats_are_numbers() {
+        assert_eq!(
+            parse(FileType::Yaml, "a: .inf\nb: -.inf\nc: .NaN\nd: '.inf'\n"),
+            serde_json::json!({"a": f64::MAX, "b": f64::MIN, "c": 0.0, "d": f64::MAX})
+        );
+        assert_eq!(
+            parse(
+                FileType::Yaml,
+                "a: 224_617.445_991_228\nb: 1_000\nc: a_b.c\n"
+            ),
+            serde_json::json!({"a": 224_617.445_991_228, "b": 1000, "c": "a_b.c"})
+        );
+        assert_eq!(
+            parse(FileType::Toml, "a = inf\nb = nan\n"),
+            serde_json::json!({"a": f64::MAX, "b": 0.0})
+        );
+    }
+
+    #[test]
     fn json5_is_supported() {
         assert_eq!(
             parse(FileType::Json5, "{a: 1, // c\n b: 'x',}"),
             serde_json::json!({"a": 1, "b": "x"})
+        );
+    }
+
+    #[test]
+    fn byte_order_mark_is_skipped() {
+        assert_eq!(parse(FileType::Json, "\u{feff}{}"), serde_json::json!({}));
+        assert_eq!(
+            parse(FileType::Yaml, "\u{feff}a: 1"),
+            serde_json::json!({"a": 1})
         );
     }
 

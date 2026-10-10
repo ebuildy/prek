@@ -1,271 +1,385 @@
-use std::fmt::Write as _;
+//! A Rust port of [check-jsonschema](https://github.com/python-jsonschema/check-jsonschema).
+//!
+//! It accepts the same options as the upstream CLI so the upstream hook entries
+//! (`check-jsonschema --builtin-schema vendor.github-workflows ...`) run unchanged.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use clap::Parser;
+use anyhow::{Result, bail};
+use clap::{ArgAction, Parser};
 use jsonschema::Validator;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde_json::Value;
+use tokio::runtime::Handle;
 
 use crate::hook::Hook;
 use crate::hooks::HookOutput;
-use crate::hooks::pre_commit_hooks::{parse_hook_args, run_blocking_file_checks};
+use crate::hooks::pre_commit_hooks::{hook_filenames, parse_hook_args};
+use crate::http::REQWEST_CLIENT;
+use crate::store::{CacheBucket, Store};
 
+use self::download::Downloader;
 use self::filetype::FileType;
+use self::report::{FileResult, Issue, Outcome, OutputFormat};
+use self::retriever::SchemaRetriever;
+use self::transforms::DataTransform;
+use self::validator::{MetaValidators, Settings};
 
+mod catalog;
+mod download;
 mod filetype;
+mod formats;
+mod report;
+mod retriever;
+mod source;
+mod transforms;
+mod validator;
 
-/// Format names upstream accepts in `--disable-formats`, plus `*` for all of them.
-const DISABLE_FORMATS_CHOICES: &[&str] = &[
-    "*",
-    "date",
-    "date-time",
-    "duration",
-    "email",
-    "hostname",
-    "idn-email",
-    "idn-hostname",
-    "ipv4",
-    "ipv6",
-    "iri",
-    "iri-reference",
-    "json-pointer",
-    "regex",
-    "relative-json-pointer",
-    "time",
-    "uri",
-    "uri-reference",
-    "uri-template",
-    "uuid",
+#[cfg(test)]
+mod tests;
+
+/// prek runs these hooks from the upstream repository with this implementation (fast path).
+/// Their manifest entries are `check-jsonschema` plus arguments this port accepts.
+const UPSTREAM_REPO: &str = "https://github.com/python-jsonschema/check-jsonschema";
+const UPSTREAM_HOOK_IDS: &[&str] = &[
+    "check-jsonschema",
+    "check-metaschema",
+    "check-azure-pipelines",
+    "check-bamboo-spec",
+    "check-bitbucket-pipelines",
+    "check-buildkite",
+    "check-changie",
+    "check-circle-ci",
+    "check-citation-file-format",
+    "check-cloudbuild",
+    "check-codecov",
+    "check-compose-spec",
+    "check-dependabot",
+    "check-drone-ci",
+    "check-github-actions",
+    "check-github-discussion",
+    "check-github-issue-config",
+    "check-github-issue-forms",
+    "check-github-workflows",
+    "check-gitlab-ci",
+    "check-meltano",
+    "check-mergify",
+    "check-readthedocs",
+    "check-renovate",
+    "check-snapcraft",
+    "check-taskfile",
+    "check-travis",
+    "check-woodpecker-ci",
+    "check-github-workflows-require-timeout",
 ];
+
+/// Whether `hook_id` from `repo_url` is an upstream check-jsonschema hook.
+pub(crate) fn is_upstream_hook(repo_url: &str, hook_id: &str) -> bool {
+    repo_url.trim_end_matches(".git") == UPSTREAM_REPO && UPSTREAM_HOOK_IDS.contains(&hook_id)
+}
+
+/// Regex dialect for `pattern`, `patternProperties` and the `regex` format.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(super) enum RegexVariant {
+    /// ECMAScript syntax.
+    #[default]
+    Default,
+    /// ECMAScript syntax. prek does not emulate non-unicode mode, so this is `default`.
+    Nonunicode,
+    /// Python `re` syntax.
+    Python,
+}
 
 #[derive(Parser)]
 #[command(disable_help_subcommand = true)]
 #[command(disable_version_flag = true)]
 #[command(disable_help_flag = true)]
 pub(crate) struct Args {
-    /// Path to a JSON Schema file, relative to the project root.
-    #[arg(long, value_name = "PATH")]
-    schemafile: PathBuf,
+    /// Path or HTTP(S) URI of the JSON Schema. Relative paths are relative to the project root.
+    #[arg(long, value_name = "PATH|URI")]
+    schemafile: Option<String>,
+    /// Override the base URI (`$id`) of the schema.
+    #[arg(long)]
+    base_uri: Option<String>,
+    /// Name of a schema bundled with check-jsonschema, such as `vendor.github-workflows`.
+    #[arg(long, value_name = "BUILTIN_SCHEMA_NAME")]
+    builtin_schema: Option<String>,
+    /// Validate each file as a schema, against the metaschema named by its `$schema`.
+    #[arg(long)]
+    check_metaschema: bool,
+    /// Always download remote schemas, and do not write the cache.
+    #[arg(long)]
+    no_cache: bool,
+    #[arg(long, hide = true)]
+    cache_filename: Option<String>,
+    /// Formats to stop checking, comma separated. `*` disables every format check.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_parser = clap::builder::PossibleValuesParser::new(formats::DISABLE_FORMATS_CHOICES),
+    )]
+    disable_formats: Vec<String>,
+    #[arg(long, value_enum, ignore_case = true, hide = true)]
+    format_regex: Option<RegexVariant>,
+    /// Regex dialect for `pattern` and the `regex` format.
+    #[arg(long, value_enum, ignore_case = true)]
+    regex_variant: Option<RegexVariant>,
     /// File type used when the extension is not recognized.
     #[arg(long, value_enum, default_value = "json")]
     default_filetype: FileType,
     /// File type used for every instance file, whatever its extension.
     #[arg(long, value_enum)]
     force_filetype: Option<FileType>,
-    /// Formats to stop checking, comma separated. `*` disables every format check.
+    /// Accepted for compatibility. Has no effect.
+    #[arg(long, hide = true, value_parser = ["full", "short"])]
+    traceback_mode: Option<String>,
+    /// Transform applied to each file before validation.
+    #[arg(long, value_enum)]
+    data_transform: Option<DataTransform>,
+    /// Fill in `default` values from the schema before validating.
+    #[arg(long)]
+    fill_defaults: bool,
+    #[arg(long, hide = true)]
+    validator_class: Option<String>,
+    /// Output format.
     #[arg(
+        short = 'o',
         long,
-        value_delimiter = ',',
-        value_parser = clap::builder::PossibleValuesParser::new(DISABLE_FORMATS_CHOICES),
+        value_enum,
+        ignore_case = true,
+        default_value = "text"
     )]
-    disable_formats: Vec<String>,
+    output_format: OutputFormat,
+    /// Accepted for compatibility. prek controls colors.
+    #[arg(long, hide = true, value_parser = ["auto", "always", "never"])]
+    color: Option<String>,
+    /// Show every error under `anyOf` and `oneOf`.
+    #[arg(short = 'v', long, action = ArgAction::Count)]
+    verbose: u8,
+    /// Print nothing; only the exit code reports the result.
+    #[arg(short = 'q', long, action = ArgAction::Count)]
+    quiet: u8,
     #[arg(value_name = "FILENAMES")]
     filenames: Vec<PathBuf>,
 }
 
-/// Runs the `check-jsonschema` hook.
-pub(crate) async fn run(hook: &Hook, filenames: &[&Path]) -> Result<HookOutput> {
-    let args: Args = parse_hook_args(hook)?;
-    let file_base = hook.project().relative_path();
-    let validator = Arc::new(compile_schema(
-        &file_base.join(&args.schemafile),
-        &args.disable_formats,
-    )?);
-    let default_filetype = args.default_filetype;
-    let force_filetype = args.force_filetype;
-
-    run_blocking_file_checks(
-        file_base,
-        &args.filenames,
-        filenames,
-        move |file_path, display_path| {
-            let file_type = match force_filetype {
-                Some(file_type) => file_type,
-                None => FileType::detect(display_path, default_filetype),
-            };
-            check_file(&validator, file_type, file_path, display_path)
-        },
-    )
-    .await
+enum SchemaMode<'a> {
+    File(&'a str),
+    Builtin(&'a str),
+    Metaschema,
 }
 
-/// Compiles the schema once so every checked file reuses it.
-fn compile_schema(path: &Path, disable_formats: &[String]) -> Result<Validator> {
-    let content = fs_err::read_to_string(path)?;
-    let schema = FileType::detect(path, FileType::Json)
-        .parse(&content)
-        .map_err(anyhow::Error::msg)
-        .with_context(|| format!("Failed to parse schema file `{}`", path.display()))?;
-    build_validator(&schema, disable_formats)
-        .with_context(|| format!("Invalid JSON Schema in `{}`", path.display()))
-}
-
-/// Upstream always passes a format checker, so formats are assertions in every draft,
-/// including 2019-09 and 2020-12 where the spec makes them annotations by default.
-/// A disabled format is replaced by a check that accepts everything.
-fn build_validator(schema: &Value, disable_formats: &[String]) -> Result<Validator> {
-    let check_formats = !disable_formats.iter().any(|name| name == "*");
-    let mut options = jsonschema::options().should_validate_formats(check_formats);
-    for name in disable_formats {
-        options = options.with_format(name.clone(), |_: &str| true);
+impl Args {
+    fn schema_mode(&self) -> Result<SchemaMode<'_>> {
+        if self.validator_class.is_some() {
+            bail!("--validator-class is not supported by prek, it loads a Python class");
+        }
+        let mode = match (
+            self.schemafile.as_deref(),
+            self.builtin_schema.as_deref(),
+            self.check_metaschema,
+        ) {
+            (Some(path), None, false) => SchemaMode::File(path),
+            (None, Some(name), false) => SchemaMode::Builtin(name),
+            (None, None, true) => SchemaMode::Metaschema,
+            (None, None, false) => {
+                bail!(
+                    "Either --schemafile, --builtin-schema, or --check-metaschema must be provided"
+                )
+            }
+            _ => bail!(
+                "--schemafile, --builtin-schema, and --check-metaschema are mutually exclusive"
+            ),
+        };
+        if matches!(mode, SchemaMode::Metaschema) && self.base_uri.is_some() {
+            bail!("'--base-uri' was used with '--metaschema'. This combination is not supported.");
+        }
+        Ok(mode)
     }
-    Ok(options.build(schema)?)
+
+    fn settings(&self) -> Settings {
+        Settings {
+            disable_formats: self.disable_formats.clone(),
+            regex_variant: self.regex_variant.or(self.format_regex).unwrap_or_default(),
+            base_uri: self.base_uri.clone(),
+        }
+    }
+
+    fn verbosity(&self) -> i32 {
+        1 + i32::from(self.verbose) - i32::from(self.quiet)
+    }
+}
+
+/// Where the hook runs: paths are relative to `base`, downloads use `client` and `cache_dir`.
+pub(super) struct Context {
+    pub(super) base: PathBuf,
+    pub(super) cache_dir: PathBuf,
+    pub(super) client: reqwest::Client,
+}
+
+/// Runs the `check-jsonschema` hook.
+pub(crate) async fn run(store: &Store, hook: &Hook, filenames: &[&Path]) -> Result<HookOutput> {
+    let args: Args = parse_hook_args(hook)?;
+    let context = Context {
+        base: hook.project().relative_path().to_path_buf(),
+        cache_dir: store.cache_path(CacheBucket::CheckJsonschema),
+        client: REQWEST_CLIENT.clone(),
+    };
+    check(args, context, filenames).await
+}
+
+pub(super) async fn check(args: Args, context: Context, selected: &[&Path]) -> Result<HookOutput> {
+    let files: Vec<PathBuf> = hook_filenames(&args.filenames, selected)
+        .map(Path::to_path_buf)
+        .collect();
+    let runtime = Handle::current();
+    // Schema downloads block on the runtime, so all the work runs on the blocking pool.
+    tokio::task::spawn_blocking(move || check_blocking(&args, &context, runtime, &files)).await?
+}
+
+enum Schema {
+    Fixed {
+        validator: Validator,
+        /// The schema, kept for `--fill-defaults`.
+        defaults: Option<Value>,
+    },
+    Meta(MetaValidators),
+}
+
+fn check_blocking(
+    args: &Args,
+    context: &Context,
+    runtime: Handle,
+    files: &[PathBuf],
+) -> Result<HookOutput> {
+    let mode = args.schema_mode()?;
+    let settings = args.settings();
+    let cache_dir = if args.no_cache {
+        None
+    } else {
+        Some(context.cache_dir.clone())
+    };
+    let downloader = Arc::new(Downloader::new(context.client.clone(), cache_dir, runtime));
+
+    let loaded = match mode {
+        SchemaMode::Metaschema => None,
+        SchemaMode::File(schemafile) => Some(source::load_schemafile(
+            schemafile,
+            &context.base,
+            &downloader,
+        )),
+        SchemaMode::Builtin(name) => Some(source::load_builtin(name)),
+    };
+    let schema = match loaded {
+        None => Schema::Meta(MetaValidators::new(settings)),
+        Some(Err(message)) => return Ok(failure(&message)),
+        Some(Ok(loaded)) => {
+            let defaults = if args.fill_defaults {
+                Some(loaded.schema.clone())
+            } else {
+                None
+            };
+            let retriever = Arc::new(SchemaRetriever::new(downloader));
+            match validator::build(loaded, &settings, &retriever) {
+                Ok(validator) => Schema::Fixed {
+                    validator,
+                    defaults,
+                },
+                Err(message) => return Ok(failure(&message)),
+            }
+        }
+    };
+
+    let results = files
+        .par_iter()
+        .map(|file| check_file(&schema, args, &context.base.join(file), file))
+        .collect::<Result<Vec<_>, String>>();
+    let results = match results {
+        Ok(results) => results,
+        Err(message) => return Ok(failure(&message)),
+    };
+    let (exit_status, output) = report::render(&results, args.output_format, args.verbosity());
+    Ok(HookOutput::unchanged(exit_status, output))
+}
+
+/// Errors that stop the whole check (bad schema, failed download) fail this hook only.
+fn failure(message: &str) -> HookOutput {
+    HookOutput::unchanged(1, format!("{message}\n").into_bytes())
 }
 
 fn check_file(
-    validator: &Validator,
-    file_type: FileType,
+    schema: &Schema,
+    args: &Args,
     file_path: &Path,
     display_path: &Path,
-) -> Result<HookOutput> {
-    let content = fs_err::read(file_path)?;
-    let Ok(content) = simdutf8::compat::from_utf8(&content) else {
-        let message = format!(
-            "{}: Failed to decode (invalid UTF-8)\n",
-            display_path.display()
-        );
-        return Ok(HookOutput::unchanged(1, message.into_bytes()));
+) -> Result<FileResult, String> {
+    let path = display_path.display().to_string();
+    let content = fs_err::read(file_path).map_err(|err| err.to_string())?;
+    let file_type = match args.force_filetype {
+        Some(file_type) => file_type,
+        None => FileType::detect(display_path, args.default_filetype),
     };
-
-    let instance = match file_type.parse(content) {
+    let mut instance = match load_instance(&content, file_type, args.data_transform) {
         Ok(instance) => instance,
-        Err(e) => {
-            let message = format!("{}: Failed to decode ({e})\n", display_path.display());
-            return Ok(HookOutput::unchanged(1, message.into_bytes()));
+        Err(message) => {
+            return Ok(FileResult {
+                path,
+                outcome: Outcome::ParseError(message),
+            });
         }
     };
-
-    let mut output = String::new();
-    for error in validator.iter_errors(&instance) {
-        let pointer = error.instance_path().to_string();
-        let pointer = if pointer.is_empty() { "/" } else { &pointer };
-        writeln!(output, "{}: {pointer}: {error}", display_path.display())?;
-    }
-    if output.is_empty() {
-        Ok(HookOutput::unchanged(0, Vec::new()))
+    let meta_validator;
+    let validator = match schema {
+        Schema::Fixed {
+            validator,
+            defaults,
+        } => {
+            if let Some(defaults) = defaults {
+                validator::fill_defaults(defaults, &mut instance);
+            }
+            validator
+        }
+        Schema::Meta(validators) => match validators.for_document(&instance)? {
+            Some(validator) => {
+                meta_validator = validator;
+                &*meta_validator
+            }
+            None => {
+                return Ok(FileResult {
+                    path,
+                    outcome: Outcome::Valid,
+                });
+            }
+        },
+    };
+    let issues: Vec<Issue> = validator
+        .iter_errors(&instance)
+        .map(|error| Issue::new(&error))
+        .collect();
+    let outcome = if issues.is_empty() {
+        Outcome::Valid
     } else {
-        Ok(HookOutput::unchanged(1, output.into_bytes()))
-    }
+        Outcome::Invalid(issues)
+    };
+    Ok(FileResult { path, outcome })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn validator() -> Validator {
-        jsonschema::validator_for(&serde_json::json!({
-            "type": "object",
-            "required": ["name"],
-            "properties": { "name": { "type": "string" }, "port": { "type": "integer" } }
-        }))
-        .unwrap()
-    }
-
-    fn check(name: &str, content: &str) -> HookOutput {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(name);
-        fs_err::write(&path, content).unwrap();
-        let file_type = FileType::detect(Path::new(name), FileType::Json);
-        check_file(&validator(), file_type, &path, Path::new(name)).unwrap()
-    }
-
-    #[test]
-    fn valid_files() {
-        assert_eq!(check("a.json", r#"{"name": "x"}"#).exit_status, 0);
-        assert_eq!(check("a.yaml", "name: x\nport: 1\n").exit_status, 0);
-        assert_eq!(check("a.toml", "name = \"x\"\n").exit_status, 0);
-        assert_eq!(check("a.json5", "{name: 'x'}").exit_status, 0);
-    }
-
-    #[test]
-    fn reports_all_errors_with_pointers() {
-        let out = check("a.yml", "port: nope\n");
-        assert_eq!(out.exit_status, 1);
-        let text = String::from_utf8(out.output).unwrap();
-        assert!(text.contains("a.yml: /port:"), "{text}");
-        assert!(text.contains("\"name\" is a required property"), "{text}");
-    }
-
-    #[test]
-    fn reports_parse_errors() {
-        assert_eq!(check("a.json", "{").exit_status, 1);
-        // Unknown extensions are parsed as the default type (JSON), like upstream.
-        assert_eq!(check(".renovaterc", r#"{"name": "x"}"#).exit_status, 0);
-        assert_eq!(check("a.txt", "name: x").exit_status, 1);
-    }
-
-    #[test]
-    fn yaml_1_1_words_are_strings() {
-        assert_eq!(check("a.yaml", "name: yes\n").exit_status, 0);
-    }
-
-    fn email_schema(draft: &str) -> serde_json::Value {
-        serde_json::json!({"$schema": draft, "format": "email"})
-    }
-
-    #[test]
-    fn formats_are_checked_for_every_draft() {
-        for draft in [
-            "http://json-schema.org/draft-07/schema#",
-            "https://json-schema.org/draft/2019-09/schema",
-            "https://json-schema.org/draft/2020-12/schema",
-        ] {
-            let validator = build_validator(&email_schema(draft), &[]).unwrap();
-            assert!(
-                !validator.is_valid(&serde_json::json!("not-an-email")),
-                "{draft}"
-            );
-        }
-    }
-
-    #[test]
-    fn disable_formats() {
-        let schema = email_schema("https://json-schema.org/draft/2020-12/schema");
-        let disabled = build_validator(&schema, &["email".to_string()]).unwrap();
-        assert!(disabled.is_valid(&serde_json::json!("not-an-email")));
-        let all = build_validator(&schema, &["*".to_string()]).unwrap();
-        assert!(all.is_valid(&serde_json::json!("not-an-email")));
-    }
-
-    #[test]
-    fn disable_formats_accepts_lists_and_rejects_unknown_names() {
-        let args = Args::try_parse_from([
-            "check-jsonschema",
-            "--schemafile",
-            "s.json",
-            "--disable-formats",
-            "email,uuid",
-            "--disable-formats",
-            "regex",
-        ])
-        .unwrap();
-        assert_eq!(args.disable_formats, ["email", "uuid", "regex"]);
-        assert!(
-            Args::try_parse_from([
-                "check-jsonschema",
-                "--schemafile",
-                "s.json",
-                "--disable-formats",
-                "nope",
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn filetype_flags() {
-        let args = Args::try_parse_from([
-            "check-jsonschema",
-            "--schemafile",
-            "s.json",
-            "--default-filetype",
-            "yaml",
-            "--force-filetype",
-            "json5",
-        ])
-        .unwrap();
-        assert_eq!(args.default_filetype, FileType::Yaml);
-        assert_eq!(args.force_filetype, Some(FileType::Json5));
-    }
+fn load_instance(
+    content: &[u8],
+    file_type: FileType,
+    transform: Option<DataTransform>,
+) -> Result<Value, String> {
+    let Ok(content) = simdutf8::compat::from_utf8(content) else {
+        return Err("invalid UTF-8".to_string());
+    };
+    let Some(transform) = transform else {
+        return file_type.parse(content);
+    };
+    let content = if file_type == FileType::Yaml {
+        transform.preprocess(content)?
+    } else {
+        content.into()
+    };
+    transform.apply(file_type.parse(&content)?)
 }

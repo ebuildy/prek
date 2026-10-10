@@ -412,6 +412,8 @@ pub(crate) enum CacheBucket {
     Npm,
     Coursier,
     Prek,
+    #[strum(serialize = "check-jsonschema")]
+    CheckJsonschema,
 }
 
 /// Convert a u64 to a hex string.

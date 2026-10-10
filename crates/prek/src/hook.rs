@@ -543,7 +543,9 @@ impl Hook {
     }
 
     pub(crate) fn needs_install_env(&self) -> bool {
-        !matches!(self.repo(), Repo::Meta | Repo::Builtin) && self.language.supports_install_env()
+        !matches!(self.repo(), Repo::Meta | Repo::Builtin)
+            && self.language.supports_install_env()
+            && !crate::hooks::skips_install_env(self)
     }
 
     /// Returns a lightweight view of the hook's environment requirement.
