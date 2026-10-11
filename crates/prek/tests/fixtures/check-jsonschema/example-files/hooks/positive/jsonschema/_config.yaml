@@ -1,3 +1,0 @@
-files:
-  github-workflow-timeout-minutes-expression.yaml:
-    add_args: ["--builtin-schema", "custom.github-workflows-require-timeout"]

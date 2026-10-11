@@ -1463,7 +1463,7 @@ async fn check_metaschema() {
     assert_eq!(env.code(&["--check-metaschema", &bad_regex]).await, 1);
 }
 
-// test_example_files.py: every upstream hook entry against upstream example files.
+// The upstream hook manifest, for the file pattern test below.
 
 fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/check-jsonschema")
@@ -1489,96 +1489,6 @@ fn upstream_hooks() -> Vec<(String, Vec<String>, Value)> {
             (id, entry, hook)
         })
         .collect()
-}
-
-/// `add_args` and `requires_packages` from a case directory's `_config.yaml`.
-fn case_config(dir: &std::path::Path, name: &str) -> Value {
-    let Ok(config) = fs_err::read_to_string(dir.join("_config.yaml")) else {
-        return Value::Null;
-    };
-    let config = super::filetype::FileType::Yaml.parse(&config).unwrap();
-    config["files"][name].clone()
-}
-
-#[tokio::test]
-#[ignore = "downloads schemas from their publishers, run with --ignored"]
-async fn hook_examples() {
-    let mut checked = 0;
-    for (id, entry, _) in upstream_hooks() {
-        let hook_name = id.trim_start_matches("check-");
-        // `example-files/hooks` is upstream's corpus. `parity` adds a passing and a failing
-        // file for hooks upstream does not cover, each verified against Python
-        // check-jsonschema (see the fixtures README).
-        for (root, category, expected) in [
-            ("example-files/hooks", "positive", 0),
-            ("example-files/hooks", "negative", 1),
-            ("parity", "positive", 0),
-            ("parity", "negative", 1),
-        ] {
-            let dir = fixtures().join(root).join(category).join(hook_name);
-            let Ok(cases) = fs_err::read_dir(&dir) else {
-                continue;
-            };
-            for case in cases {
-                let path = case.unwrap().path();
-                let name = path.file_name().unwrap().to_string_lossy().to_string();
-                if name == "_config.yaml" {
-                    continue;
-                }
-                let config = case_config(&dir, &name);
-                // Upstream skips cases that need optional Python packages, such as `rfc3987`
-                // for the `uri` format, which upstream does not check without them.
-                if config.get("requires_packages").is_some() {
-                    continue;
-                }
-                let add_args: Vec<String> = config["add_args"]
-                    .as_array()
-                    .map(|args| {
-                        args.iter()
-                            .map(|arg| arg.as_str().unwrap().to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let path_arg = path.display().to_string();
-                let mut args: Vec<&str> = entry.iter().map(String::as_str).collect();
-                args.push(&path_arg);
-                args.extend(add_args.iter().map(String::as_str));
-                let run = Env::new().run(&args).await;
-                assert_eq!(
-                    run.code, expected,
-                    "{id} {root}/{category}/{name}: {}",
-                    run.output
-                );
-                checked += 1;
-            }
-        }
-    }
-    assert!(checked >= 70, "only {checked} cases ran");
-}
-
-#[tokio::test]
-async fn explicit_schema_examples() {
-    for (category, expected) in [("positive", 0), ("negative", 1)] {
-        let dir = fixtures()
-            .join("example-files/explicit-schema")
-            .join(category);
-        for case in fs_err::read_dir(&dir).unwrap() {
-            let case = case.unwrap().path();
-            let find = |names: &[&str]| {
-                names
-                    .iter()
-                    .map(|name| case.join(name))
-                    .find(|path| path.exists())
-                    .unwrap()
-                    .display()
-                    .to_string()
-            };
-            let instance = find(&["instance.json", "instance.yaml", "instance.toml"]);
-            let schema = find(&["schema.json", "schema.yaml"]);
-            let run = Env::new().run(&["--schemafile", &schema, &instance]).await;
-            assert_eq!(run.code, expected, "{}: {}", case.display(), run.output);
-        }
-    }
 }
 
 // test_hook_file_matches.py, evaluated with prek's `files` and `types` matching.

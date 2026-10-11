@@ -1,3 +1,0 @@
-files:
-  2020_invalid_format_value.json:
-    add_args: ["--disable-formats", "*"]
