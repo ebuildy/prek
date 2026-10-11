@@ -2,8 +2,9 @@
 //!
 //! `schemas/vendor` and `schemas/custom` are copies of upstream
 //! `src/check_jsonschema/builtin_schemas/{vendor,custom}` (licenses in
-//! `schemas/vendor/licenses`). To refresh them, copy those directories from the upstream
-//! release that prek should match and update the list below.
+//! `schemas/vendor/licenses`). `scripts/sync-check-jsonschema.py` downloads the vendored
+//! ones again from their publishers. A schema added there must also be added to the lists
+//! below; a test checks that they match the files.
 
 /// Schemas that upstream vendors from their publishers, by catalog name.
 const VENDOR: &[(&str, &str)] = &[
@@ -115,6 +116,26 @@ mod tests {
         for (name, schema) in VENDOR.iter().chain(CUSTOM) {
             let parsed: Result<serde_json::Value, _> = serde_json::from_str(schema);
             assert!(parsed.is_ok(), "{name}");
+        }
+    }
+
+    /// Fails when a sync adds or removes a schema file without updating the lists.
+    #[test]
+    fn lists_match_schema_files() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/hooks/builtin_hooks/check_jsonschema/schemas");
+        for (subdir, table) in [("vendor", VENDOR), ("custom", CUSTOM)] {
+            let mut files: Vec<String> = fs_err::read_dir(dir.join(subdir))
+                .unwrap()
+                .filter_map(|entry| {
+                    let name = entry.unwrap().file_name().into_string().unwrap();
+                    name.strip_suffix(".json").map(str::to_owned)
+                })
+                .collect();
+            files.sort();
+            let mut listed: Vec<&str> = table.iter().map(|(name, _)| *name).collect();
+            listed.sort_unstable();
+            assert_eq!(files, listed, "schemas/{subdir}");
         }
     }
 

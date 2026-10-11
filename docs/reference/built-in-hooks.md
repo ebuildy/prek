@@ -379,7 +379,8 @@ repos:
 - `--schemafile <PATH|URI>`: local path (relative to the project root, `~` and `file://` work)
   or HTTP(S) URL of the schema.
 - `--builtin-schema <NAME>`: a schema bundled with upstream, such as `vendor.github-workflows`
-  or `custom.github-workflows-require-timeout`.
+  or `custom.github-workflows-require-timeout`. The schemas are embedded in prek, so they
+  change with prek releases, whatever `rev` the fast path config names.
 - `--check-metaschema`: validate each file as a schema against the metaschema of its `$schema`.
 - `--base-uri <URI>`: override the schema `$id`.
 - `--no-cache`: always download remote schemas.

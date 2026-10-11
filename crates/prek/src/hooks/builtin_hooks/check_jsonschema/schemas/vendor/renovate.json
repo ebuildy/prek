@@ -1,8 +1,8 @@
 {
   "$id": "https://docs.renovatebot.com/renovate-schema.json",
-  "title": "JSON schema for Renovate 44.103.6 config files (https://renovatebot.com/)",
+  "title": "JSON schema for Renovate 44.149.3 config files (https://renovatebot.com/)",
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "x-renovate-version": "44.103.6",
+  "x-renovate-version": "44.149.3",
   "allowComments": true,
   "type": "object",
   "definitions": {
@@ -2169,10 +2169,6 @@
           "type": "string",
           "description": "A constraint for the `java` Containerbase tool"
         },
-        "java-maven": {
-          "type": "string",
-          "description": "A constraint for the `java-maven` Containerbase tool"
-        },
         "jb": {
           "type": "string",
           "description": "A constraint for the `jb` Containerbase tool"
@@ -3382,8 +3378,8 @@
       "default": false
     },
     "enabled": {
-      "description": "Enable or disable corresponding functionality.\nSee also: https://docs.renovatebot.com/configuration-options/#packagerulesenabled",
-      "markdownDescription": "Enable or disable corresponding functionality.\n\nSee also: [enabled](https://docs.renovatebot.com/configuration-options/#packagerulesenabled)",
+      "description": "Enable or disable corresponding functionality.\nSee also: https://docs.renovatebot.com/configuration-options/#enabled",
+      "markdownDescription": "Enable or disable corresponding functionality.\n\nSee also: [enabled](https://docs.renovatebot.com/configuration-options/#enabled)",
       "type": "boolean",
       "default": true
     },
@@ -3480,8 +3476,8 @@
       "type": "string"
     },
     "fetchChangeLogs": {
-      "description": "Controls if and when changelogs/release notes are fetched.\nSee also: https://docs.renovatebot.com/configuration-options/#packagerulesfetchchangelogs",
-      "markdownDescription": "Controls if and when changelogs/release notes are fetched.\n\nSee also: [fetchChangeLogs](https://docs.renovatebot.com/configuration-options/#packagerulesfetchchangelogs)",
+      "description": "Controls if and when changelogs/release notes are fetched.\nSee also: https://docs.renovatebot.com/configuration-options/#fetchchangelogs",
+      "markdownDescription": "Controls if and when changelogs/release notes are fetched.\n\nSee also: [fetchChangeLogs](https://docs.renovatebot.com/configuration-options/#fetchchangelogs)",
       "type": "string",
       "enum": [
         "off",
@@ -5137,239 +5133,9 @@
       "default": {},
       "additionalProperties": false,
       "properties": {
-        "apm": {
-          "type": "object",
-          "description": "Install the `apm` Containerbase tool",
-          "additionalProperties": false
-        },
-        "bazelisk": {
-          "type": "object",
-          "description": "Install the `bazelisk` Containerbase tool",
-          "additionalProperties": false
-        },
-        "bun": {
-          "type": "object",
-          "description": "Install the `bun` Containerbase tool",
-          "additionalProperties": false
-        },
-        "bundler": {
-          "type": "object",
-          "description": "Install the `bundler` Containerbase tool",
-          "additionalProperties": false
-        },
-        "cocoapods": {
-          "type": "object",
-          "description": "Install the `cocoapods` Containerbase tool",
-          "additionalProperties": false
-        },
-        "composer": {
-          "type": "object",
-          "description": "Install the `composer` Containerbase tool",
-          "additionalProperties": false
-        },
-        "conan": {
-          "type": "object",
-          "description": "Install the `conan` Containerbase tool",
-          "additionalProperties": false
-        },
-        "copier": {
-          "type": "object",
-          "description": "Install the `copier` Containerbase tool",
-          "additionalProperties": false
-        },
-        "corepack": {
-          "type": "object",
-          "description": "Install the `corepack` Containerbase tool",
-          "additionalProperties": false
-        },
-        "deno": {
-          "type": "object",
-          "description": "Install the `deno` Containerbase tool",
-          "additionalProperties": false
-        },
-        "devbox": {
-          "type": "object",
-          "description": "Install the `devbox` Containerbase tool",
-          "additionalProperties": false
-        },
-        "dotnet": {
-          "type": "object",
-          "description": "Install the `dotnet` Containerbase tool",
-          "additionalProperties": false
-        },
-        "erlang": {
-          "type": "object",
-          "description": "Install the `erlang` Containerbase tool",
-          "additionalProperties": false
-        },
-        "elixir": {
-          "type": "object",
-          "description": "Install the `elixir` Containerbase tool",
-          "additionalProperties": false
-        },
-        "flux": {
-          "type": "object",
-          "description": "Install the `flux` Containerbase tool",
-          "additionalProperties": false
-        },
-        "gh": {
-          "type": "object",
-          "description": "Install the `gh` Containerbase tool",
-          "additionalProperties": false
-        },
-        "gleam": {
-          "type": "object",
-          "description": "Install the `gleam` Containerbase tool",
-          "additionalProperties": false
-        },
-        "golang": {
-          "type": "object",
-          "description": "Install the `golang` Containerbase tool",
-          "additionalProperties": false
-        },
-        "gradle": {
-          "type": "object",
-          "description": "Install the `gradle` Containerbase tool",
-          "additionalProperties": false
-        },
-        "hashin": {
-          "type": "object",
-          "description": "Install the `hashin` Containerbase tool",
-          "additionalProperties": false
-        },
-        "helm": {
-          "type": "object",
-          "description": "Install the `helm` Containerbase tool",
-          "additionalProperties": false
-        },
-        "helmfile": {
-          "type": "object",
-          "description": "Install the `helmfile` Containerbase tool",
-          "additionalProperties": false
-        },
-        "java": {
-          "type": "object",
-          "description": "Install the `java` Containerbase tool",
-          "additionalProperties": false
-        },
-        "java-maven": {
-          "type": "object",
-          "description": "Install the `java-maven` Containerbase tool",
-          "additionalProperties": false
-        },
-        "jb": {
-          "type": "object",
-          "description": "Install the `jb` Containerbase tool",
-          "additionalProperties": false
-        },
-        "kustomize": {
-          "type": "object",
-          "description": "Install the `kustomize` Containerbase tool",
-          "additionalProperties": false
-        },
-        "maven": {
-          "type": "object",
-          "description": "Install the `maven` Containerbase tool",
-          "additionalProperties": false
-        },
-        "mise": {
-          "type": "object",
-          "description": "Install the `mise` Containerbase tool",
-          "additionalProperties": false
-        },
-        "nix": {
-          "type": "object",
-          "description": "Install the `nix` Containerbase tool",
-          "additionalProperties": false
-        },
-        "node": {
-          "type": "object",
-          "description": "Install the `node` Containerbase tool",
-          "additionalProperties": false
-        },
-        "npm": {
-          "type": "object",
-          "description": "Install the `npm` Containerbase tool",
-          "additionalProperties": false
-        },
-        "pdm": {
-          "type": "object",
-          "description": "Install the `pdm` Containerbase tool",
-          "additionalProperties": false
-        },
-        "php": {
-          "type": "object",
-          "description": "Install the `php` Containerbase tool",
-          "additionalProperties": false
-        },
-        "pip-tools": {
-          "type": "object",
-          "description": "Install the `pip-tools` Containerbase tool",
-          "additionalProperties": false
-        },
-        "pipenv": {
-          "type": "object",
-          "description": "Install the `pipenv` Containerbase tool",
-          "additionalProperties": false
-        },
-        "pnpm": {
-          "type": "object",
-          "description": "Install the `pnpm` Containerbase tool",
-          "additionalProperties": false
-        },
-        "pixi": {
-          "type": "object",
-          "description": "Install the `pixi` Containerbase tool",
-          "additionalProperties": false
-        },
-        "poetry": {
-          "type": "object",
-          "description": "Install the `poetry` Containerbase tool",
-          "additionalProperties": false
-        },
-        "python": {
-          "type": "object",
-          "description": "Install the `python` Containerbase tool",
-          "additionalProperties": false
-        },
         "ruby": {
           "type": "object",
           "description": "Install the `ruby` Containerbase tool. Also used in the `rubygems` Datasource",
-          "additionalProperties": false
-        },
-        "rust": {
-          "type": "object",
-          "description": "Install the `rust` Containerbase tool",
-          "additionalProperties": false
-        },
-        "uv": {
-          "type": "object",
-          "description": "Install the `uv` Containerbase tool",
-          "additionalProperties": false
-        },
-        "yarn": {
-          "type": "object",
-          "description": "Install the `yarn` Containerbase tool",
-          "additionalProperties": false
-        },
-        "yarn-slim": {
-          "type": "object",
-          "description": "Install the `yarn-slim` Containerbase tool",
-          "additionalProperties": false
-        },
-        "dart": {
-          "type": "object",
-          "description": "Install the `dart` Containerbase tool",
-          "additionalProperties": false
-        },
-        "flutter": {
-          "type": "object",
-          "description": "Install the `flutter` Containerbase tool",
-          "additionalProperties": false
-        },
-        "vendir": {
-          "type": "object",
-          "description": "Install the `vendir` Containerbase tool",
           "additionalProperties": false
         }
       }
@@ -5929,8 +5695,8 @@
       }
     },
     "managerFilePatterns": {
-      "description": "RegEx (`re2`) and glob patterns for matching manager files.\nSee also: https://docs.renovatebot.com/configuration-options/#ansiblemanagerfilepatterns",
-      "markdownDescription": "RegEx (`re2`) and glob patterns for matching manager files.\n\nSee also: [managerFilePatterns](https://docs.renovatebot.com/configuration-options/#ansiblemanagerfilepatterns)",
+      "description": "RegEx (`re2`) and glob patterns for matching manager files.\nSee also: https://docs.renovatebot.com/configuration-options/#managerfilepatterns",
+      "markdownDescription": "RegEx (`re2`) and glob patterns for matching manager files.\n\nSee also: [managerFilePatterns](https://docs.renovatebot.com/configuration-options/#managerfilepatterns)",
       "oneOf": [
         {
           "type": "array",
@@ -6086,6 +5852,11 @@
       "description": "A domain name, host name or base URL to match against.\nSee also: https://docs.renovatebot.com/configuration-options/#hostrulesmatchhost",
       "markdownDescription": "A domain name, host name or base URL to match against.\n\nSee also: [matchHost](https://docs.renovatebot.com/configuration-options/#hostrulesmatchhost)",
       "type": "string"
+    },
+    "matchIsBreaking": {
+      "description": "Matches only if the update is considered breaking (e.g. major, or minor for 0.x in ecosystems like Cargo) when `true`, or non-breaking when `false`. Valid only within a `packageRules` object.\nSee also: https://docs.renovatebot.com/configuration-options/#packagerulesmatchisbreaking",
+      "markdownDescription": "Matches only if the update is considered breaking (e.g. major, or minor for 0.x in ecosystems like Cargo) when `true`, or non-breaking when `false`. Valid only within a `packageRules` object.\n\nSee also: [matchIsBreaking](https://docs.renovatebot.com/configuration-options/#packagerulesmatchisbreaking)",
+      "type": "boolean"
     },
     "matchJsonata": {
       "description": "A JSONata expression to match against the full config object. Valid only within a `packageRules` object.\nSee also: https://docs.renovatebot.com/configuration-options/#packagerulesmatchjsonata",
@@ -7293,6 +7064,9 @@
               },
               "matchFileNames": {
                 "$ref": "#/definitions/matchFileNames"
+              },
+              "matchIsBreaking": {
+                "$ref": "#/definitions/matchIsBreaking"
               },
               "matchJsonata": {
                 "$ref": "#/definitions/matchJsonata"
@@ -8649,8 +8423,7 @@
       "default": {},
       "additionalProperties": {
         "type": "string"
-      },
-      "$ref": "#"
+      }
     },
     "registryUrlTemplate": {
       "description": "Optional registry URL for extracted dependencies. Valid only within a `customManagers` object.\nSee also: https://docs.renovatebot.com/configuration-options/#custommanagersregistryurltemplate",
@@ -10343,6 +10116,7 @@
             "github-actions",
             "glasskube",
             "go-mod-directive",
+            "gomod",
             "gradle",
             "hashicorp",
             "helm",
@@ -11843,7 +11617,7 @@
       },
       {
         "required": [
-          "allowCustomCrateRegistries"
+          "allowCustomCrateGitRegistries"
         ]
       },
       {
