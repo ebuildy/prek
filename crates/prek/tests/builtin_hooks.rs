@@ -3856,6 +3856,36 @@ fn check_jsonschema_filetypes_and_formats() {
     "#);
 }
 
+/// An invalid `PREK_JSONSCHEMA_MIRROR` fails the hook with a clear message.
+#[test]
+fn check_jsonschema_invalid_mirror() {
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
+        repos:
+          - repo: builtin
+            hooks:
+              - id: check-jsonschema
+                files: ^a\.yaml$
+                args: [--builtin-schema, vendor.github-workflows]
+    "})
+        .with_file("a.yaml", "a: 1\n")
+        .init_git();
+
+    cmd_snapshot!(context, context.run().env(EnvVars::PREK_JSONSCHEMA_MIRROR, "mirror.corp/schemastore"), @r"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check jsonschema.........................................................Failed
+    - hook id: check-jsonschema
+    - description: Validates JSON, YAML and TOML files against a JSON Schema
+    - exit code: 1
+
+      Invalid `PREK_JSONSCHEMA_MIRROR` value `mirror.corp/schemastore`: expected an absolute http(s) URL
+
+    ----- stderr -----
+    ");
+}
+
 /// Hooks from the upstream check-jsonschema repository run with the Rust implementation and
 /// install no Python environment.
 #[test]
