@@ -269,7 +269,7 @@ pub(super) async fn check(args: Args, context: Context, selected: &[&Path]) -> R
 /// Chooses the validator for each document.
 struct Checker {
     /// From `--schemafile` or `--builtin-schema`.
-    fixed: Option<Fixed>,
+    fixed: Option<Arc<Fixed>>,
     /// From `--check-metaschema`.
     meta: Option<MetaValidators>,
     /// From `--schema-from-instances`.
@@ -277,6 +277,7 @@ struct Checker {
     fill_defaults: bool,
 }
 
+/// A compiled schema, from the command line or declared by a document.
 struct Fixed {
     validator: Validator,
     /// The schema, kept for `--fill-defaults`.
@@ -318,7 +319,7 @@ fn check_blocking(
         Some(Ok(loaded)) => {
             let retriever = Arc::new(SchemaRetriever::new(downloader.clone()));
             match validator::build(loaded, &settings, &retriever) {
-                Ok((validator, schema)) => Some(Fixed { validator, schema }),
+                Ok((validator, schema)) => Some(Arc::new(Fixed { validator, schema })),
                 Err(message) => return Ok(failure(&message)),
             }
         }
@@ -415,15 +416,17 @@ impl Checker {
         modeline: Option<&str>,
         base_dir: &Path,
     ) -> Result<Outcome, String> {
-        if let Some(declared) = &self.declared
+        let fixed = if let Some(declared) = &self.declared
             && let Some(location) = declared::declared_schema(&document, modeline)
         {
-            return Ok(match declared.get(location, base_dir) {
-                Ok(validator) => validate(&validator, &document),
-                Err(message) => Outcome::SchemaError(message),
-            });
-        }
-        if let Some(fixed) = &self.fixed {
+            match declared.get(location, base_dir) {
+                Ok(fixed) => Some(fixed),
+                Err(message) => return Ok(Outcome::SchemaError(message)),
+            }
+        } else {
+            self.fixed.clone()
+        };
+        if let Some(fixed) = fixed {
             if self.fill_defaults {
                 validator::fill_defaults(&fixed.schema, &mut document);
             }

@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use jsonschema::Validator;
 use serde_json::Value;
 
+use super::Fixed;
 use super::download::Downloader;
 use super::retriever::SchemaRetriever;
 use super::source;
@@ -18,7 +18,7 @@ pub(super) struct DeclaredSchemas {
     settings: Settings,
     downloader: Arc<Downloader>,
     /// Compiled schemas by directory and location, so each one is loaded once per run.
-    cache: Mutex<HashMap<(String, String), Arc<Validator>>>,
+    cache: Mutex<HashMap<(String, String), Arc<Fixed>>>,
 }
 
 impl DeclaredSchemas {
@@ -30,24 +30,24 @@ impl DeclaredSchemas {
         }
     }
 
-    pub(super) fn get(&self, location: &str, base_dir: &Path) -> Result<Arc<Validator>, String> {
+    pub(super) fn get(&self, location: &str, base_dir: &Path) -> Result<Arc<Fixed>, String> {
         let key = (base_dir.display().to_string(), location.to_string());
-        if let Some(validator) = self
+        if let Some(fixed) = self
             .cache
             .lock()
             .ok()
             .and_then(|cache| cache.get(&key).cloned())
         {
-            return Ok(validator);
+            return Ok(fixed);
         }
         let loaded = source::load_schemafile(location, base_dir, &self.downloader)?;
         let retriever = Arc::new(SchemaRetriever::new(self.downloader.clone()));
-        let (validator, _) = validator::build(loaded, &self.settings, &retriever)?;
-        let validator = Arc::new(validator);
+        let (validator, schema) = validator::build(loaded, &self.settings, &retriever)?;
+        let fixed = Arc::new(Fixed { validator, schema });
         if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(key, validator.clone());
+            cache.insert(key, fixed.clone());
         }
-        Ok(validator)
+        Ok(fixed)
     }
 }
 

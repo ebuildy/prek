@@ -883,6 +883,25 @@ async fn fill_defaults() {
     assert_eq!(env.code(&[&fill[..], &[&missing]].concat()).await, 0);
 }
 
+#[tokio::test]
+async fn fill_defaults_with_declared_schema() {
+    let env = Env::new();
+    env.write_json(
+        "schema.json",
+        &json!({
+            "properties": {"title": {"type": "string", "default": "Untitled"}},
+            "required": ["title"]
+        }),
+    );
+    let missing = env.write_json("missing.json", &json!({"$schema": "schema.json"}));
+    assert_eq!(env.code(&["--schema-from-instances", &missing]).await, 1);
+    assert_eq!(
+        env.code(&["--fill-defaults", "--schema-from-instances", &missing])
+            .await,
+        0
+    );
+}
+
 // test_malformed_instances.py
 
 #[tokio::test]
