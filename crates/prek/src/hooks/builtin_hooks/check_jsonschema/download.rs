@@ -1,18 +1,26 @@
 //! Remote schema downloads with an on-disk cache, ported from upstream `cachedownloader.py`.
 //!
-//! Every lookup sends a GET. The cached copy is used when its mtime is at least the
-//! response's `Last-Modified`. Without that header, prek compares the response's `ETag`
-//! with the one saved next to the cache file and sends it as `If-None-Match`, so a `304`
-//! also reuses the cache (upstream issue #668). With neither header, an existing cache file
-//! always wins, like upstream. A fresh body must parse before it is cached; a body that
-//! does not parse is retried like a failed request.
+//! Unlike upstream, the cache is read first: a cache file checked less than [`MAX_AGE`] ago
+//! (its mtime) is used with no request, so runs work offline. An older entry is revalidated
+//! like upstream does on every lookup: the cached copy is kept when its download time is at
+//! least the response's `Last-Modified`. Without that header, prek compares the response's
+//! `ETag` with the one saved next to the cache file and sends it as `If-None-Match`, so a
+//! `304` also keeps the cache (upstream issue #668). With neither header, the cached copy
+//! always wins, like upstream. A fresh body must parse before it is cached; a body that does
+//! not parse is retried like a failed request.
+//!
+//! The download time is kept in a sidecar file, because the mtime records the last check:
+//! revalidating or falling back touches it, which must not make an old copy look newer than
+//! a remote change. When revalidation fails without a `4xx` (network error, `5xx`, a body that
+//! does not parse), the stale copy is used with a warning and counts as checked, so offline
+//! runs do not retry it every time. A `4xx` stays an error, so a deleted schema is reported.
 //!
 //! `PREK_JSONSCHEMA_MIRROR` fetches schemastore.org URLs from a mirror, for networks without
 //! access to schemastore.org. Only the fetched URL changes: the cache key, `$id` and `$ref`
 //! resolution keep the original URL.
 
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_lc_rs::digest::{SHA256, digest};
 use reqwest::header::{ETAG, IF_NONE_MATCH, LAST_MODIFIED};
@@ -20,9 +28,13 @@ use tokio::runtime::Handle;
 use tracing::debug;
 
 use crate::http::REQWEST_CLIENT;
+use crate::warn_user;
 
 /// One request plus two retries, like upstream.
 const ATTEMPTS: usize = 3;
+
+/// How long a checked cache file is used without a request.
+pub(super) const MAX_AGE: Duration = Duration::from_hours(14 * 24);
 
 /// URL prefixes that `PREK_JSONSCHEMA_MIRROR` replaces.
 const SCHEMASTORE_PREFIXES: &[&str] = &[
@@ -83,6 +95,62 @@ struct Response {
 /// HTTP 304: the cached copy matches the `If-None-Match` `ETag`.
 const NOT_MODIFIED: u16 = 304;
 
+/// A cache file and what is known about it.
+struct Cached {
+    path: PathBuf,
+    content: Vec<u8>,
+    /// The mtime: when the copy was last downloaded or confirmed.
+    checked: SystemTime,
+    /// Seconds since the epoch.
+    downloaded: u64,
+    etag: Option<String>,
+}
+
+impl Cached {
+    fn read(path: &Path) -> Option<Self> {
+        let content = fs_err::read(path).ok()?;
+        let checked = fs_err::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()?;
+        // Cache files written before the sidecar existed were downloaded at their mtime.
+        let downloaded = fs_err::read_to_string(downloaded_path(path))
+            .ok()
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or_else(|| epoch_secs(checked));
+        Some(Self {
+            content,
+            checked,
+            downloaded,
+            etag: fs_err::read_to_string(etag_path(path)).ok(),
+            path: path.to_path_buf(),
+        })
+    }
+
+    fn is_fresh(&self) -> bool {
+        SystemTime::now()
+            .duration_since(self.checked)
+            .is_ok_and(|age| age < MAX_AGE)
+    }
+
+    /// Marks the copy as checked now.
+    fn touch(&self) {
+        let touched = fs_err::OpenOptions::new()
+            .write(true)
+            .open(&self.path)
+            .and_then(|file| file.file().set_modified(SystemTime::now()));
+        if let Err(err) = touched {
+            debug!("Failed to touch `{}`: {err}", self.path.display());
+        }
+    }
+}
+
+/// Why revalidation or a download failed.
+struct Failure {
+    message: String,
+    /// A `4xx` response: the schema is gone, so a cached copy must not hide it.
+    client_error: bool,
+}
+
 impl Downloader {
     pub(super) fn new(
         client: Option<reqwest::Client>,
@@ -98,16 +166,46 @@ impl Downloader {
         }
     }
 
-    /// Downloads `url`, or reads it from the cache. `parses` decides whether a fresh body is
+    /// Reads `url` from the cache, or downloads it. `parses` decides whether a fresh body is
     /// usable. This blocks on the runtime, so call it from a blocking thread.
     pub(super) fn get(&self, url: &str, parses: impl Fn(&[u8]) -> bool) -> Result<Vec<u8>, String> {
         let cache_file = self
             .cache_dir
             .as_ref()
             .map(|dir| dir.join(cache_filename(url)));
-        let cached_etag = cache_file
-            .as_ref()
-            .and_then(|path| fs_err::read_to_string(etag_path(path)).ok());
+        let cached = cache_file.as_deref().and_then(Cached::read);
+        if let Some(cached) = &cached
+            && cached.is_fresh()
+        {
+            return Ok(cached.content.clone());
+        }
+        match self.download(url, cache_file.as_deref(), cached.as_ref(), parses) {
+            Ok(content) => Ok(content),
+            Err(failure) => match cached {
+                Some(cached) if !failure.client_error => {
+                    let days =
+                        epoch_secs(SystemTime::now()).saturating_sub(cached.downloaded) / 86_400;
+                    warn_user!(
+                        "`{url}` could not be refreshed, using the cached copy from {days} days ago: {}",
+                        failure.message
+                    );
+                    cached.touch();
+                    Ok(cached.content)
+                }
+                _ => Err(failure.message),
+            },
+        }
+    }
+
+    /// Sends the request, revalidating `cached` when there is one.
+    fn download(
+        &self,
+        url: &str,
+        cache_file: Option<&Path>,
+        cached: Option<&Cached>,
+        parses: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<u8>, Failure> {
+        let cached_etag = cached.and_then(|cached| cached.etag.as_deref());
         let mirrored = self.mirror.as_ref().and_then(|mirror| mirror.rewrite(url));
         if let Some(mirrored) = &mirrored {
             debug!("Fetching `{url}` from mirror `{mirrored}`");
@@ -118,51 +216,54 @@ impl Downloader {
             None => REQWEST_CLIENT.clone(),
         };
         let mut last_error = String::new();
+        let mut client_error = false;
         for _ in 0..ATTEMPTS {
-            let request = fetch(&client, fetch_url, cached_etag.as_deref());
+            let request = fetch(&client, fetch_url, cached_etag);
             let response = match self.runtime.block_on(request) {
                 Ok(response) => response,
                 Err(err) => {
                     last_error = format!("encountered error during download: {err}");
+                    client_error = false;
                     continue;
                 }
             };
-            if response.status == NOT_MODIFIED
-                && let Some(path) = &cache_file
-                && let Ok(content) = fs_err::read(path)
+            if let Some(cached) = cached
+                && (response.status == NOT_MODIFIED
+                    || ((200..300).contains(&response.status) && is_cache_hit(cached, &response)))
             {
-                return Ok(content);
+                cached.touch();
+                return Ok(cached.content.clone());
             }
             if !(200..300).contains(&response.status) {
                 last_error = format!(
                     "got response with status={}, retries exhausted",
                     response.status
                 );
+                client_error = (400..500).contains(&response.status);
                 continue;
-            }
-            if let Some(path) = &cache_file
-                && is_cache_hit(path, &response, cached_etag.as_deref())
-                && let Ok(content) = fs_err::read(path)
-            {
-                return Ok(content);
             }
             if !parses(&response.body) {
                 last_error = "downloaded content could not be parsed, retries exhausted".into();
+                client_error = false;
                 continue;
             }
-            if let Some(path) = &cache_file
+            if let Some(path) = cache_file
                 && let Err(err) = store(path, &response)
             {
                 debug!("Failed to cache `{url}` at `{}`: {err}", path.display());
             }
             return Ok(response.body);
         }
-        match &mirrored {
-            Some(mirrored) => Err(format!(
-                "failed to download `{url}` from mirror `{mirrored}`: {last_error}"
-            )),
-            None => Err(format!("failed to download `{url}`: {last_error}")),
-        }
+        let message = match &mirrored {
+            Some(mirrored) => {
+                format!("failed to download `{url}` from mirror `{mirrored}`: {last_error}")
+            }
+            None => format!("failed to download `{url}`: {last_error}"),
+        };
+        Err(Failure {
+            message,
+            client_error,
+        })
     }
 }
 
@@ -202,8 +303,22 @@ fn etag_path(cache_file: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The download time of a cache file, in seconds since the epoch, is saved next to it.
+fn downloaded_path(cache_file: &Path) -> PathBuf {
+    let mut name = cache_file.as_os_str().to_owned();
+    name.push(".downloaded");
+    PathBuf::from(name)
+}
+
+fn epoch_secs(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
 fn store(path: &Path, response: &Response) -> std::io::Result<()> {
     write_atomic(path, &response.body)?;
+    let downloaded = epoch_secs(SystemTime::now()).to_string();
+    write_atomic(&downloaded_path(path), downloaded.as_bytes())?;
     match &response.etag {
         Some(etag) => write_atomic(&etag_path(path), etag.as_bytes()),
         None => match fs_err::remove_file(etag_path(path)) {
@@ -223,18 +338,13 @@ pub(super) fn cache_filename(url: &str) -> String {
     }
 }
 
-fn is_cache_hit(path: &Path, response: &Response, cached_etag: Option<&str>) -> bool {
-    let Ok(modified) = fs_err::metadata(path).and_then(|meta| meta.modified()) else {
-        return false;
-    };
+/// Whether a `2xx` response leaves the cached copy current.
+fn is_cache_hit(cached: &Cached, response: &Response) -> bool {
     if let Some(remote) = response.last_modified.as_deref().and_then(parse_http_date) {
-        let local = modified
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs());
-        return local >= remote;
+        return cached.downloaded >= remote;
     }
     match &response.etag {
-        Some(etag) => cached_etag == Some(etag.as_str()),
+        Some(etag) => cached.etag.as_deref() == Some(etag.as_str()),
         None => true,
     }
 }

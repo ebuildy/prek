@@ -7,7 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -23,6 +23,29 @@ use crate::hooks::HookOutput;
 struct Run {
     code: i32,
     output: String,
+}
+
+fn set_mtime(path: &Path, time: SystemTime) {
+    fs_err::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(time)
+        .unwrap();
+}
+
+fn mtime(path: &Path) -> SystemTime {
+    fs_err::metadata(path).unwrap().modified().unwrap()
+}
+
+fn days_ago(days: u64) -> SystemTime {
+    SystemTime::now() - Duration::from_hours(days * 24)
+}
+
+/// A URL on a port nothing listens on, so requests fail like when offline.
+fn unreachable_url(path: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    format!("http://{}{path}", listener.local_addr().unwrap())
 }
 
 struct Env {
@@ -66,9 +89,12 @@ impl Env {
         self.cache_dir().join(cache_filename(url))
     }
 
+    /// A cache entry checked 15 days ago, so it is revalidated like upstream does on every
+    /// lookup.
     fn inject_cache(&self, url: &str, content: &str) {
         fs_err::create_dir_all(self.cache_dir()).unwrap();
         fs_err::write(self.cache_path(url), content).unwrap();
+        set_mtime(&self.cache_path(url), days_ago(15));
     }
 
     async fn run(&self, args: &[&str]) -> Run {
@@ -1174,17 +1200,191 @@ async fn stale_cache_is_replaced() {
         &[("Last-Modified", "Sun, 01 Jan 2000 00:00:01 GMT")],
     );
     env.inject_cache(&url, r#"{"type": "integer"}"#);
-    let old = SystemTime::UNIX_EPOCH + Duration::from_hours(250_000);
-    fs_err::File::options()
-        .write(true)
-        .open(env.cache_path(&url))
-        .unwrap()
-        .set_modified(old)
-        .unwrap();
+    set_mtime(
+        &env.cache_path(&url),
+        SystemTime::UNIX_EPOCH + Duration::from_hours(250_000),
+    );
     let instance = env.write("instance.json", r#""text""#);
     assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
     let cached = fs_err::read_to_string(env.cache_path(&url)).unwrap();
     assert_eq!(cached, r#"{"type": "string"}"#);
+}
+
+// Cache-first lookups (prek addition)
+
+#[tokio::test]
+async fn fresh_cache_sends_no_request() {
+    let server = Server::start();
+    let env = Env::new();
+    server.add("/schema1.json", &json!({"type": "integer"}));
+    let url = server.url("/schema1.json");
+    let instance = env.write("instance.json", "42");
+    assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
+    assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
+    assert_eq!(server.calls("/schema1.json"), 1);
+    // A cache file checked almost 14 days ago is still fresh.
+    set_mtime(&env.cache_path(&url), days_ago(13));
+    assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
+    assert_eq!(server.calls("/schema1.json"), 1);
+}
+
+#[tokio::test]
+async fn stale_cache_is_refreshed_when_online() {
+    let server = Server::start();
+    let env = Env::new();
+    let url = server.url("/schema1.json");
+    server.add_full(
+        "/schema1.json",
+        200,
+        r#"{"type": "string"}"#,
+        &[("Last-Modified", "Sun, 01 Jan 2090 00:00:01 GMT")],
+    );
+    env.inject_cache(&url, r#"{"type": "integer"}"#);
+    let instance = env.write("instance.json", r#""text""#);
+    assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
+    assert_eq!(server.calls("/schema1.json"), 1);
+    let cache = env.cache_path(&url);
+    assert_eq!(
+        fs_err::read_to_string(&cache).unwrap(),
+        r#"{"type": "string"}"#
+    );
+    assert!(mtime(&cache) > days_ago(1));
+    assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
+    assert_eq!(server.calls("/schema1.json"), 1);
+}
+
+#[tokio::test]
+async fn revalidated_cache_counts_as_checked() {
+    let server = Server::start();
+    let env = Env::new();
+    let url = server.url("/schema1.json");
+    server.add_full("/schema1.json", 304, "", &[("ETag", "\"v1\"")]);
+    env.inject_cache(&url, r#"{"type": "integer"}"#);
+    fs_err::write(format!("{}.etag", env.cache_path(&url).display()), "\"v1\"").unwrap();
+    let instance = env.write("instance.json", "42");
+    assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
+    assert!(mtime(&env.cache_path(&url)) > days_ago(1));
+    assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
+    assert_eq!(server.calls("/schema1.json"), 1);
+}
+
+#[tokio::test]
+async fn stale_cache_is_used_when_offline() {
+    // A server error after every retry, and a refused connection, both mean offline.
+    let server = Server::start();
+    server.add_full("/schema1.json", 503, "", &[]);
+    for url in [
+        server.url("/schema1.json"),
+        unreachable_url("/schema1.json"),
+    ] {
+        let env = Env::new();
+        env.inject_cache(&url, r#"{"type": "integer"}"#);
+        let etag = format!("{}.etag", env.cache_path(&url).display());
+        fs_err::write(&etag, "\"v1\"").unwrap();
+        let instance = env.write("instance.json", "42");
+        let run = env.run(&["--schemafile", &url, &instance]).await;
+        assert_eq!(run.code, 0, "{url}: {}", run.output);
+        let cache = env.cache_path(&url);
+        assert_eq!(
+            fs_err::read_to_string(&cache).unwrap(),
+            r#"{"type": "integer"}"#
+        );
+        assert!(mtime(&cache) > days_ago(1), "{url}");
+        assert_eq!(fs_err::read_to_string(&etag).unwrap(), "\"v1\"");
+    }
+    let calls = server.calls("/schema1.json");
+    assert_eq!(calls, 3);
+
+    // The next run uses the touched copy without a request.
+    let env = Env::new();
+    let url = server.url("/schema1.json");
+    env.inject_cache(&url, r#"{"type": "integer"}"#);
+    let instance = env.write("instance.json", "42");
+    assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
+    assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
+    assert_eq!(server.calls("/schema1.json"), calls + 3);
+}
+
+#[tokio::test]
+async fn missing_cache_fails_when_offline() {
+    let env = Env::new();
+    let url = unreachable_url("/schema1.json");
+    let instance = env.write("instance.json", "42");
+    let run = env.run(&["--schemafile", &url, &instance]).await;
+    assert_eq!(run.code, 1);
+    assert!(
+        run.output.contains(&format!("failed to download `{url}`")),
+        "{}",
+        run.output
+    );
+}
+
+#[tokio::test]
+async fn stale_cache_does_not_hide_a_deleted_schema() {
+    for status in [404, 410] {
+        let server = Server::start();
+        let env = Env::new();
+        server.add_full("/schema1.json", status, "", &[]);
+        let url = server.url("/schema1.json");
+        env.inject_cache(&url, r#"{"type": "integer"}"#);
+        let instance = env.write("instance.json", "42");
+        let run = env.run(&["--schemafile", &url, &instance]).await;
+        assert_eq!(run.code, 1, "{status}");
+        assert!(
+            run.output.contains(&format!("status={status}")),
+            "{}",
+            run.output
+        );
+    }
+}
+
+/// A touched cache file must not look newer than a remote change made between its download
+/// and the touch: freshness against `Last-Modified` uses the download time.
+#[tokio::test]
+async fn touched_cache_keeps_its_download_time() {
+    let server = Server::start();
+    let env = Env::new();
+    let url = server.url("/schema1.json");
+    server.add_full(
+        "/schema1.json",
+        200,
+        r#"{"type": "string"}"#,
+        &[("Last-Modified", "Sun, 01 Jan 2000 00:00:01 GMT")],
+    );
+    // Downloaded in 1998, last touched by an offline run 15 days ago.
+    env.inject_cache(&url, r#"{"type": "integer"}"#);
+    let downloaded = SystemTime::UNIX_EPOCH + Duration::from_hours(250_000);
+    fs_err::write(
+        format!("{}.downloaded", env.cache_path(&url).display()),
+        downloaded
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string(),
+    )
+    .unwrap();
+    let instance = env.write("instance.json", r#""text""#);
+    assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
+    assert_eq!(
+        fs_err::read_to_string(env.cache_path(&url)).unwrap(),
+        r#"{"type": "string"}"#
+    );
+}
+
+#[tokio::test]
+async fn no_cache_ignores_a_fresh_cache() {
+    let server = Server::start();
+    let env = Env::new();
+    server.add("/schema1.json", &json!({"type": "integer"}));
+    let url = server.url("/schema1.json");
+    let instance = env.write("instance.json", "42");
+    assert_eq!(env.code(&["--schemafile", &url, &instance]).await, 0);
+    assert_eq!(
+        env.code(&["--schemafile", &url, "--no-cache", &instance])
+            .await,
+        0
+    );
+    assert_eq!(server.calls("/schema1.json"), 2);
 }
 
 // --check-metaschema
