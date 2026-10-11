@@ -358,8 +358,8 @@ repos:
   `date-time`, `time`, `email` and `idn-email` (an `@` check), `idn-hostname`, `ipv4`, `ipv6`,
   `regex` and `uuid`, in every draft. Other formats such as `uri` or `hostname` are not checked.
 - `$ref` to local files and HTTP(S) URLs is resolved, in JSON, YAML, TOML or JSON5.
-- Downloads are retried twice and cached in prek's cache directory, keyed by URL. A cached file
-  is reused unless the server's `Last-Modified` is newer.
+- Downloads are retried twice and cached in prek's cache directory, keyed by URL. When a cached
+  file is revalidated, it is kept unless the server's `Last-Modified` is newer.
 - A schema that cannot be loaded fails this hook only.
 
 **Additions over upstream** (from upstream feature requests)
@@ -373,6 +373,12 @@ repos:
   resolve against the file's directory. `--schemafile` or `--builtin-schema`, if also given,
   applies to documents that name no schema (upstream #310, #340, #644).
 - Without `Last-Modified`, the cache is validated with the server's `ETag` (upstream #668).
+- Remote schemas work offline. A cached schema checked less than 14 days ago is used without
+  any request (upstream sends one on every run). An older one is revalidated. If the server
+  cannot be reached, answers with a `5xx` error, or sends a body that does not parse, prek warns
+  and uses the cached copy, which then counts as checked for another 14 days. A `4xx` response
+  such as `404` is still an error, so a deleted schema is reported. `--no-cache` always
+  downloads.
 - `PREK_JSONSCHEMA_MIRROR` fetches `json.schemastore.org` and `www.schemastore.org` schemas
   from a mirror, for air-gapped environments. This covers `--schemafile`, remote `$ref` and
   schemas named by documents. Cache entries, `$id` and `$ref` resolution keep the original URL.

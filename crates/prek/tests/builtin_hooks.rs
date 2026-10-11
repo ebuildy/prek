@@ -3856,6 +3856,74 @@ fn check_jsonschema_filetypes_and_formats() {
     "#);
 }
 
+/// A stale cached schema is used with a warning when it cannot be refreshed, and counts as
+/// fresh afterwards.
+#[test]
+fn check_jsonschema_offline_uses_stale_cache() -> Result<()> {
+    // Nothing listens on this port once the listener is dropped.
+    let url = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        format!("http://{}/schema.json", listener.local_addr()?)
+    };
+    let context = TestEnv::new()
+        .with_config(format!(
+            indoc::indoc! {r"
+            repos:
+              - repo: builtin
+                hooks:
+                  - id: check-jsonschema
+                    files: ^a\.json$
+                    args: [--schemafile, '{}']
+            "},
+            url
+        ))
+        .with_file("a.json", "42")
+        .with_filter(r"127\.0\.0\.1:\d+", "[HOST]")
+        .with_filter(
+            r"(could not be refreshed, using the cached copy from \d+ days ago): .*",
+            "$1: [ERROR]",
+        )
+        .init_git();
+
+    let name = hex::encode(aws_lc_rs::digest::digest(
+        &aws_lc_rs::digest::SHA256,
+        url.as_bytes(),
+    ));
+    let cache = context
+        .home_dir()
+        .child(format!("cache/check-jsonschema/{name}.json"));
+    cache.write_str(r#"{"type": "integer"}"#)?;
+    let fifteen_days = std::time::Duration::from_hours(15 * 24);
+    fs_err::File::options()
+        .write(true)
+        .open(cache.path())?
+        .set_modified(std::time::SystemTime::now() - fifteen_days)?;
+
+    cmd_snapshot!(context, context.run(), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    check jsonschema.........................................................Passed
+
+    ----- stderr -----
+    warning: `http://[HOST]/schema.json` could not be refreshed, using the cached copy from 15 days ago: [ERROR]
+    ");
+
+    let modified = fs_err::metadata(cache.path())?.modified()?;
+    assert!(modified.elapsed()? < std::time::Duration::from_hours(1));
+
+    // The touched copy is fresh: no request, no warning.
+    cmd_snapshot!(context, context.run(), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    check jsonschema.........................................................Passed
+
+    ----- stderr -----
+    ");
+    Ok(())
+}
+
 /// An invalid `PREK_JSONSCHEMA_MIRROR` fails the hook with a clear message.
 #[test]
 fn check_jsonschema_invalid_mirror() {
