@@ -388,9 +388,13 @@ repos:
 
 - `--schemafile <PATH|URI>`: local path (relative to the project root, `~` and `file://` work)
   or HTTP(S) URL of the schema.
-- `--builtin-schema <NAME>`: a schema bundled with upstream, such as `vendor.github-workflows`
-  or `custom.github-workflows-require-timeout`. The schemas are embedded in prek, so they
-  change with prek releases, whatever `rev` the fast path config names.
+- `--builtin-schema <NAME>`: a schema known to upstream, such as `vendor.github-workflows` or
+  `custom.github-workflows-require-timeout`. The `vendor.*` schemas are not embedded in prek.
+  They are downloaded from their publishers (the URLs of upstream's catalog) and cached like
+  `--schemafile` URLs, so the first run needs network access, or `PREK_JSONSCHEMA_MIRROR` for
+  schemas hosted on schemastore. Because the latest published version is used, they change
+  whenever the publisher changes them, whatever `rev` the fast path config names.
+  `custom.github-workflows-require-timeout` is small and embedded.
 - `--check-metaschema`: validate each file as a schema against the metaschema of its `$schema`.
 - `--base-uri <URI>`: override the schema `$id`.
 - `--no-cache`: always download remote schemas.

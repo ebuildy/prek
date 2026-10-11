@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::catalog;
+use super::catalog::{self, BuiltinSchema};
 use super::download::Downloader;
 use super::filetype::FileType;
 
@@ -72,14 +72,25 @@ pub(super) fn load_schemafile(
 }
 
 /// Reads a `--builtin-schema`. Builtin schemas have no retrieval URI, like upstream.
-pub(super) fn load_builtin(name: &str) -> Result<LoadedSchema, String> {
-    let Some(text) = catalog::builtin_schema(name) else {
+pub(super) fn load_builtin(name: &str, downloader: &Downloader) -> Result<LoadedSchema, String> {
+    let Some(builtin) = catalog::builtin_schema(name) else {
         return Err(format!(
             "Error: no builtin schema named `{name}`. Choose from: {}",
             catalog::builtin_schema_names().join(", ")
         ));
     };
-    let schema = parse_schema(FileType::Json, text.as_bytes(), name)?;
+    let schema = match builtin {
+        BuiltinSchema::Embedded(text) => parse_schema(FileType::Json, text.as_bytes(), name)?,
+        BuiltinSchema::Remote(url) => {
+            let file_type = FileType::detect_url(url, FileType::Json);
+            let body = downloader
+                .get(url, |body| file_type.parse_bytes(body).is_ok())
+                .map_err(|err| {
+                    format!("Error: Unexpected Error building schema validator\n  {err}")
+                })?;
+            parse_schema(file_type, &body, url)?
+        }
+    };
     Ok(LoadedSchema {
         schema,
         retrieval_uri: None,

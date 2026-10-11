@@ -109,7 +109,8 @@ pub(crate) struct Args {
     /// Override the base URI (`$id`) of the schema.
     #[arg(long)]
     base_uri: Option<String>,
-    /// Name of a schema bundled with check-jsonschema, such as `vendor.github-workflows`.
+    /// Name of a schema known to check-jsonschema, such as `vendor.github-workflows`. Vendored
+    /// schemas are downloaded from their publishers and cached.
     #[arg(long, value_name = "BUILTIN_SCHEMA_NAME")]
     builtin_schema: Option<String>,
     /// Validate each file as a schema, against the metaschema named by its `$schema`.
@@ -327,7 +328,7 @@ fn check_blocking(
             &context.base,
             &downloader,
         )),
-        SchemaMode::Builtin(name) => Some(source::load_builtin(name)),
+        SchemaMode::Builtin(name) => Some(source::load_builtin(name, &downloader)),
     };
     let fixed = match loaded {
         None => None,

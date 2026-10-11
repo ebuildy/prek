@@ -377,6 +377,34 @@ async fn schemastore_mirror() {
     );
 }
 
+/// `--builtin-schema vendor.*` downloads the schema from its publisher through the same cache
+/// and mirror as `--schemafile`. The test serves `vendor.github-workflows` from a mirror.
+#[tokio::test]
+async fn remote_builtin_schema_uses_the_mirror_and_the_cache() {
+    let server = Server::start();
+    server.add(
+        "/store/github-workflow",
+        &json!({"properties": {"title": {"type": "string"}}}),
+    );
+    let env = Env {
+        mirror: Some(Mirror::parse(&server.url("/store/")).unwrap()),
+        ..Env::new()
+    };
+    for passes in [true, false] {
+        let doc = env.write_json("instance.json", &title(passes));
+        let run = env
+            .run(&["--builtin-schema", "vendor.github-workflows", &doc])
+            .await;
+        assert_eq!(run.code, i32::from(!passes), "{}", run.output);
+    }
+    // The second run reads the fresh cache, and the cache is keyed by the publisher's URL.
+    assert_eq!(server.calls("/store/github-workflow"), 1);
+    assert!(
+        env.cache_path("https://json.schemastore.org/github-workflow")
+            .exists()
+    );
+}
+
 // test_remote_ref_resolution.py
 
 fn serve_case(server: &Server, case: &RefCase) -> String {
@@ -841,6 +869,7 @@ async fn regex_format_js_specific() {
 }
 
 #[tokio::test]
+#[ignore = "downloads schemas from their publishers, run with --ignored"]
 async fn regex_format_in_renovate_config() {
     let env = Env::new();
     let doc = env.write_json(
@@ -1018,6 +1047,7 @@ async fn remote_schema_requiring_retry() {
 // test_gitlab_reference_handling.py
 
 #[tokio::test]
+#[ignore = "downloads schemas from their publishers, run with --ignored"]
 async fn gitlab_reference_handling() {
     for (passes, script) in [
         (
@@ -1471,6 +1501,7 @@ fn case_config(dir: &std::path::Path, name: &str) -> Value {
 }
 
 #[tokio::test]
+#[ignore = "downloads schemas from their publishers, run with --ignored"]
 async fn hook_examples() {
     let mut checked = 0;
     for (id, entry, _) in upstream_hooks() {
@@ -1862,6 +1893,7 @@ async fn multi_document_yaml() {
 
 /// Issue #561: a GitLab CI file with a `spec:inputs` header document.
 #[tokio::test]
+#[ignore = "downloads schemas from their publishers, run with --ignored"]
 async fn gitlab_ci_spec_inputs_header() {
     let env = Env::new();
     let doc = env.write(
@@ -2033,8 +2065,9 @@ async fn errors_report_line_numbers() {
     );
 }
 
-/// Every bundled schema loads and compiles, so every upstream hook can run.
+/// Every `--builtin-schema` name downloads and compiles, so every upstream hook can run.
 #[tokio::test]
+#[ignore = "downloads schemas from their publishers, run with --ignored"]
 async fn every_builtin_schema_compiles() {
     let env = Env::new();
     let doc = env.write("doc.json", "{}");

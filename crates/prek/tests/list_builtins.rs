@@ -52,7 +52,8 @@ fn list_builtins_defaults_to_verbose_output() {
             --base-uri <BASE_URI>
                 Override the base URI (`$id`) of the schema
             --builtin-schema <BUILTIN_SCHEMA_NAME>
-                Name of a schema bundled with check-jsonschema, such as `vendor.github-workflows`
+                Name of a schema known to check-jsonschema, such as `vendor.github-workflows`. Vendored
+                schemas are downloaded from their publishers and cached
             --check-metaschema
                 Validate each file as a schema, against the metaschema named by its `$schema`
             --no-cache

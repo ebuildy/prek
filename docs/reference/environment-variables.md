@@ -123,6 +123,8 @@ query: with `https://mirror.corp/schemastore`,
 `https://json.schemastore.org/github-workflow.json` is fetched from
 `https://mirror.corp/schemastore/github-workflow.json`. Other hosts are not affected. The value
 must be an absolute `http(s)` URL. Schemas are cached and resolved under their original URL.
+This includes the `vendor.*` schemas of `--builtin-schema` that are hosted on schemastore. The
+others (for example GitHub, GitLab or Renovate) are not covered.
 See [`check-jsonschema`](built-in-hooks.md#check-jsonschema) for details.
 
 ### `PREK_CONDA_INSTALLER`
