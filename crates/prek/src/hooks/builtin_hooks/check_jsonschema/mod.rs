@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{ArgAction, Parser};
 use jsonschema::Validator;
 use prek_consts::env_vars::{EnvVars, EnvVarsRead};
@@ -185,12 +185,12 @@ enum SchemaMode<'a> {
 }
 
 impl Args {
-    fn schema_mode(&self) -> Result<SchemaMode<'_>> {
+    fn schema_mode(&self) -> Result<SchemaMode<'_>, &'static str> {
         if self.validator_class.is_some() {
-            bail!("--validator-class is not supported by prek, it loads a Python class");
+            return Err("--validator-class is not supported by prek, it loads a Python class");
         }
         if self.schema_from_instances && self.check_metaschema {
-            bail!("--schema-from-instances and --check-metaschema are mutually exclusive");
+            return Err("--schema-from-instances and --check-metaschema are mutually exclusive");
         }
         let mode = match (
             self.schemafile.as_deref(),
@@ -202,16 +202,20 @@ impl Args {
             (None, None, true) => SchemaMode::Metaschema,
             (None, None, false) if self.schema_from_instances => SchemaMode::Declared,
             (None, None, false) => {
-                bail!(
-                    "Either --schemafile, --builtin-schema, or --check-metaschema must be provided"
-                )
+                return Err(
+                    "Either --schemafile, --builtin-schema, or --check-metaschema must be provided",
+                );
             }
-            _ => bail!(
-                "--schemafile, --builtin-schema, and --check-metaschema are mutually exclusive"
-            ),
+            _ => {
+                return Err(
+                    "--schemafile, --builtin-schema, and --check-metaschema are mutually exclusive",
+                );
+            }
         };
         if matches!(mode, SchemaMode::Metaschema) && self.base_uri.is_some() {
-            bail!("'--base-uri' was used with '--metaschema'. This combination is not supported.");
+            return Err(
+                "'--base-uri' was used with '--metaschema'. This combination is not supported.",
+            );
         }
         Ok(mode)
     }
@@ -239,8 +243,14 @@ pub(super) struct Context {
 }
 
 /// Runs the `check-jsonschema` hook.
+///
+/// Every upstream hook id runs here, whatever its arguments, so invalid arguments fail this
+/// hook like the upstream CLI would instead of aborting the whole run.
 pub(crate) async fn run(store: &Store, hook: &Hook, filenames: &[&Path]) -> Result<HookOutput> {
-    let args: Args = parse_hook_args(hook)?;
+    let args: Args = match parse_hook_args(hook) {
+        Ok(args) => args,
+        Err(err) => return Ok(failure(&format!("{err:#}"))),
+    };
     let mirror = match EnvVars.var(EnvVars::PREK_JSONSCHEMA_MIRROR) {
         Ok(value) if !value.is_empty() => match Mirror::parse(&value) {
             Ok(mirror) => Some(mirror),
@@ -263,7 +273,10 @@ pub(super) async fn check(args: Args, context: Context, selected: &[&Path]) -> R
         .collect();
     let runtime = Handle::current();
     // Schema downloads block on the runtime, so all the work runs on the blocking pool.
-    tokio::task::spawn_blocking(move || check_blocking(&args, &context, runtime, &files)).await?
+    Ok(
+        tokio::task::spawn_blocking(move || check_blocking(&args, &context, runtime, &files))
+            .await?,
+    )
 }
 
 /// Chooses the validator for each document.
@@ -289,8 +302,11 @@ fn check_blocking(
     context: &Context,
     runtime: Handle,
     files: &[PathBuf],
-) -> Result<HookOutput> {
-    let mode = args.schema_mode()?;
+) -> HookOutput {
+    let mode = match args.schema_mode() {
+        Ok(mode) => mode,
+        Err(message) => return failure(message),
+    };
     let settings = args.settings();
     let cache_dir = if args.no_cache {
         None
@@ -315,12 +331,12 @@ fn check_blocking(
     };
     let fixed = match loaded {
         None => None,
-        Some(Err(message)) => return Ok(failure(&message)),
+        Some(Err(message)) => return failure(&message),
         Some(Ok(loaded)) => {
             let retriever = Arc::new(SchemaRetriever::new(downloader.clone()));
             match validator::build(loaded, &settings, &retriever) {
                 Ok((validator, schema)) => Some(Arc::new(Fixed { validator, schema })),
-                Err(message) => return Ok(failure(&message)),
+                Err(message) => return failure(&message),
             }
         }
     };
@@ -345,10 +361,10 @@ fn check_blocking(
         .collect::<Result<Vec<_>, String>>();
     let results = match results {
         Ok(results) => results.into_iter().flatten().collect::<Vec<_>>(),
-        Err(message) => return Ok(failure(&message)),
+        Err(message) => return failure(&message),
     };
     let (exit_status, output) = report::render(&results, args.output_format, args.verbosity());
-    Ok(HookOutput::unchanged(exit_status, output))
+    HookOutput::unchanged(exit_status, output)
 }
 
 /// Errors that stop the whole check (bad schema, failed download) fail this hook only.

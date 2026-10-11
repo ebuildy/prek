@@ -1072,10 +1072,7 @@ async fn schema_options_are_required_and_mutually_exclusive() {
             &doc,
         ],
     ] {
-        assert!(
-            check(parse_args(&args), env.context(), &[]).await.is_err(),
-            "{args:?}"
-        );
+        assert_eq!(env.code(&args).await, 1, "{args:?}");
     }
 }
 
