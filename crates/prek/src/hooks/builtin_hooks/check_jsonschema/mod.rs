@@ -9,6 +9,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use clap::{ArgAction, Parser};
 use jsonschema::Validator;
+use prek_consts::env_vars::{EnvVars, EnvVarsRead};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde_json::Value;
 use tokio::runtime::Handle;
@@ -19,7 +20,7 @@ use crate::hooks::pre_commit_hooks::{hook_filenames, parse_hook_args};
 use crate::store::{CacheBucket, Store};
 
 use self::declared::DeclaredSchemas;
-use self::download::Downloader;
+use self::download::{Downloader, Mirror};
 use self::filetype::FileType;
 use self::report::{FileResult, Issue, Outcome, OutputFormat};
 use self::retriever::SchemaRetriever;
@@ -229,20 +230,29 @@ impl Args {
 }
 
 /// Where the hook runs: paths are relative to `base`, downloads use `client` (prek's shared
-/// client when `None`) and `cache_dir`.
+/// client when `None`), `cache_dir` and the schemastore.org `mirror`.
 pub(super) struct Context {
     pub(super) base: PathBuf,
     pub(super) cache_dir: PathBuf,
     pub(super) client: Option<reqwest::Client>,
+    pub(super) mirror: Option<Mirror>,
 }
 
 /// Runs the `check-jsonschema` hook.
 pub(crate) async fn run(store: &Store, hook: &Hook, filenames: &[&Path]) -> Result<HookOutput> {
     let args: Args = parse_hook_args(hook)?;
+    let mirror = match EnvVars.var(EnvVars::PREK_JSONSCHEMA_MIRROR) {
+        Ok(value) if !value.is_empty() => match Mirror::parse(&value) {
+            Ok(mirror) => Some(mirror),
+            Err(message) => return Ok(failure(&message)),
+        },
+        _ => None,
+    };
     let context = Context {
         base: hook.project().relative_path().to_path_buf(),
         cache_dir: store.cache_path(CacheBucket::CheckJsonschema),
         client: None,
+        mirror,
     };
     check(args, context, filenames).await
 }
@@ -286,7 +296,12 @@ fn check_blocking(
     } else {
         Some(context.cache_dir.clone())
     };
-    let downloader = Arc::new(Downloader::new(context.client.clone(), cache_dir, runtime));
+    let downloader = Arc::new(Downloader::new(
+        context.client.clone(),
+        cache_dir,
+        context.mirror.clone(),
+        runtime,
+    ));
 
     let loaded = match mode {
         SchemaMode::Metaschema | SchemaMode::Declared => None,

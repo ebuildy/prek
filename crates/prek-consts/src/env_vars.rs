@@ -95,6 +95,7 @@ impl EnvVars {
     pub const PREK_CONCURRENT_HOOKS: &'static str = "PREK_CONCURRENT_HOOKS";
     pub const PREK_CONCURRENT_BATCHES: &'static str = "PREK_CONCURRENT_BATCHES";
     pub const PREK_NO_FAST_PATH: &'static str = "PREK_NO_FAST_PATH";
+    pub const PREK_JSONSCHEMA_MIRROR: &'static str = "PREK_JSONSCHEMA_MIRROR";
     pub const PREK_UV_SOURCE: &'static str = "PREK_UV_SOURCE";
     pub const PREK_NATIVE_TLS: &'static str = "PREK_NATIVE_TLS";
     pub const PREK_DOWNLOAD_CHECKSUM_POLICY: &'static str = "PREK_DOWNLOAD_CHECKSUM_POLICY";

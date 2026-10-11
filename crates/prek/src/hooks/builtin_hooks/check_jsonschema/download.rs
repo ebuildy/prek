@@ -6,6 +6,10 @@
 //! also reuses the cache (upstream issue #668). With neither header, an existing cache file
 //! always wins, like upstream. A fresh body must parse before it is cached; a body that
 //! does not parse is retried like a failed request.
+//!
+//! `PREK_JSONSCHEMA_MIRROR` fetches schemastore.org URLs from a mirror, for networks without
+//! access to schemastore.org. Only the fetched URL changes: the cache key, `$id` and `$ref`
+//! resolution keep the original URL.
 
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -20,12 +24,52 @@ use crate::http::REQWEST_CLIENT;
 /// One request plus two retries, like upstream.
 const ATTEMPTS: usize = 3;
 
+/// URL prefixes that `PREK_JSONSCHEMA_MIRROR` replaces.
+const SCHEMASTORE_PREFIXES: &[&str] = &[
+    "https://json.schemastore.org/",
+    "https://www.schemastore.org/",
+    "http://json.schemastore.org/",
+    "http://www.schemastore.org/",
+];
+
+/// A mirror of schemastore.org, from `PREK_JSONSCHEMA_MIRROR`.
+#[derive(Clone, Debug)]
+pub(crate) struct Mirror {
+    /// The base URL, without trailing slashes.
+    base: String,
+}
+
+impl Mirror {
+    /// Accepts an absolute http(s) URL.
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        let valid = url::Url::parse(value)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host());
+        if !valid {
+            return Err(format!(
+                "Invalid `PREK_JSONSCHEMA_MIRROR` value `{value}`: expected an absolute http(s) URL"
+            ));
+        }
+        Ok(Self {
+            base: value.trim_end_matches('/').to_string(),
+        })
+    }
+
+    /// The mirror URL for a schemastore.org URL, `None` for other hosts.
+    pub(super) fn rewrite(&self, url: &str) -> Option<String> {
+        SCHEMASTORE_PREFIXES
+            .iter()
+            .find_map(|prefix| url.strip_prefix(prefix))
+            .map(|rest| format!("{}/{rest}", self.base))
+    }
+}
+
 pub(super) struct Downloader {
     /// `None` means prek's shared client. It is only touched when a download happens,
     /// because creating it loads TLS certificates, which would slow down local-only runs.
     client: Option<reqwest::Client>,
     /// `None` when `--no-cache` is set.
     cache_dir: Option<PathBuf>,
+    mirror: Option<Mirror>,
     runtime: Handle,
 }
 
@@ -43,11 +87,13 @@ impl Downloader {
     pub(super) fn new(
         client: Option<reqwest::Client>,
         cache_dir: Option<PathBuf>,
+        mirror: Option<Mirror>,
         runtime: Handle,
     ) -> Self {
         Self {
             client,
             cache_dir,
+            mirror,
             runtime,
         }
     }
@@ -62,13 +108,18 @@ impl Downloader {
         let cached_etag = cache_file
             .as_ref()
             .and_then(|path| fs_err::read_to_string(etag_path(path)).ok());
+        let mirrored = self.mirror.as_ref().and_then(|mirror| mirror.rewrite(url));
+        if let Some(mirrored) = &mirrored {
+            debug!("Fetching `{url}` from mirror `{mirrored}`");
+        }
+        let fetch_url = mirrored.as_deref().unwrap_or(url);
         let client = match &self.client {
             Some(client) => client.clone(),
             None => REQWEST_CLIENT.clone(),
         };
         let mut last_error = String::new();
         for _ in 0..ATTEMPTS {
-            let request = fetch(&client, url, cached_etag.as_deref());
+            let request = fetch(&client, fetch_url, cached_etag.as_deref());
             let response = match self.runtime.block_on(request) {
                 Ok(response) => response,
                 Err(err) => {
@@ -106,7 +157,12 @@ impl Downloader {
             }
             return Ok(response.body);
         }
-        Err(format!("failed to download `{url}`: {last_error}"))
+        match &mirrored {
+            Some(mirrored) => Err(format!(
+                "failed to download `{url}` from mirror `{mirrored}`: {last_error}"
+            )),
+            None => Err(format!("failed to download `{url}`: {last_error}")),
+        }
     }
 }
 
@@ -245,6 +301,84 @@ mod tests {
             cache_filename("https://a.example/s.json"),
             cache_filename("https://b.example/s.json")
         );
+    }
+
+    #[test]
+    fn mirror_rewrites_schemastore_urls() {
+        let mirror = Mirror::parse("https://mirror.corp/schemastore").unwrap();
+        for host in [
+            "https://json.schemastore.org",
+            "https://www.schemastore.org",
+            "http://json.schemastore.org",
+            "http://www.schemastore.org",
+        ] {
+            assert_eq!(
+                mirror
+                    .rewrite(&format!("{host}/github-workflow.json"))
+                    .as_deref(),
+                Some("https://mirror.corp/schemastore/github-workflow.json"),
+                "{host}"
+            );
+        }
+        assert_eq!(
+            mirror
+                .rewrite("https://json.schemastore.org/dir/schema.json?v=2#/defs")
+                .as_deref(),
+            Some("https://mirror.corp/schemastore/dir/schema.json?v=2#/defs")
+        );
+    }
+
+    #[test]
+    fn mirror_joins_with_one_slash() {
+        for base in [
+            "https://mirror.corp/schemastore",
+            "https://mirror.corp/schemastore/",
+            "https://mirror.corp/schemastore//",
+        ] {
+            let mirror = Mirror::parse(base).unwrap();
+            assert_eq!(
+                mirror
+                    .rewrite("https://json.schemastore.org/a.json")
+                    .as_deref(),
+                Some("https://mirror.corp/schemastore/a.json"),
+                "{base}"
+            );
+        }
+        let mirror = Mirror::parse("http://localhost:8080").unwrap();
+        assert_eq!(
+            mirror
+                .rewrite("https://www.schemastore.org/a.json")
+                .as_deref(),
+            Some("http://localhost:8080/a.json")
+        );
+    }
+
+    #[test]
+    fn mirror_leaves_other_hosts() {
+        let mirror = Mirror::parse("https://mirror.corp/schemastore").unwrap();
+        for url in [
+            "https://raw.githubusercontent.com/org/repo/main/schema.json",
+            "https://schemastore.org/a.json",
+            "https://json.schemastore.org.evil.example/a.json",
+            "https://example.com/https://json.schemastore.org/a.json",
+        ] {
+            assert_eq!(mirror.rewrite(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn mirror_must_be_absolute_http_url() {
+        for value in [
+            "",
+            "mirror.corp/schemastore",
+            "/srv/schemastore",
+            "ftp://mirror.corp/schemastore",
+            "file:///srv/schemastore",
+            "https://",
+        ] {
+            let err = Mirror::parse(value).unwrap_err();
+            assert!(err.contains("PREK_JSONSCHEMA_MIRROR"), "{value}: {err}");
+        }
     }
 
     #[test]

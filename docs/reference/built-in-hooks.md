@@ -374,6 +374,9 @@ repos:
   resolve against the file's directory. `--schemafile` or `--builtin-schema`, if also given,
   applies to documents that name no schema (upstream #310, #340, #644).
 - Without `Last-Modified`, the cache is validated with the server's `ETag` (upstream #668).
+- `PREK_JSONSCHEMA_MIRROR` fetches `json.schemastore.org` and `www.schemastore.org` schemas
+  from a mirror, for air-gapped environments. This covers `--schemafile`, remote `$ref` and
+  schemas named by documents. Cache entries, `$id` and `$ref` resolution keep the original URL.
 
 **Supported arguments**
 

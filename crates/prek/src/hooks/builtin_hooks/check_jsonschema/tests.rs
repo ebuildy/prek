@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 use clap::Parser;
 use serde_json::{Value, json};
 
-use super::download::cache_filename;
+use super::download::{Mirror, cache_filename};
 use super::{Args, Context, check};
 use crate::hooks::HookOutput;
 
@@ -27,12 +27,14 @@ struct Run {
 
 struct Env {
     dir: tempfile::TempDir,
+    mirror: Option<Mirror>,
 }
 
 impl Env {
     fn new() -> Self {
         Self {
             dir: tempfile::tempdir().unwrap(),
+            mirror: None,
         }
     }
 
@@ -45,6 +47,7 @@ impl Env {
             base: self.dir.path().to_path_buf(),
             cache_dir: self.cache_dir(),
             client: Some(reqwest::Client::new()),
+            mirror: self.mirror.clone(),
         }
     }
 
@@ -299,6 +302,50 @@ async fn local_ref_schema_failure_message() {
     assert!(
         run.output
             .contains(r#"{"foo":"bar"} is not of type "string""#),
+        "{}",
+        run.output
+    );
+}
+
+// PREK_JSONSCHEMA_MIRROR
+
+#[tokio::test]
+async fn schemastore_mirror() {
+    let server = Server::start();
+    // `$ref` resolves against the original URL, so the referenced schema is mirrored too.
+    server.add(
+        "/store/mirror-test.json",
+        &json!({"properties": {"title": {"$ref": "./title.json"}}}),
+    );
+    server.add("/store/title.json", &json!({"type": "string"}));
+    let env = Env {
+        mirror: Some(Mirror::parse(&server.url("/store/")).unwrap()),
+        ..Env::new()
+    };
+    let schema = "https://json.schemastore.org/mirror-test.json";
+    for passes in [true, false] {
+        let doc = env.write_json("instance.json", &title(passes));
+        let run = env.run(&["--schemafile", schema, &doc]).await;
+        assert_eq!(run.code, i32::from(!passes), "{}", run.output);
+    }
+    assert!(server.calls("/store/mirror-test.json") >= 1);
+    assert!(server.calls("/store/title.json") >= 1);
+    // The cache is keyed by the original URL.
+    assert!(env.cache_path(schema).exists());
+    assert!(
+        env.cache_path("https://json.schemastore.org/title.json")
+            .exists()
+    );
+
+    let doc = env.write_json("instance.json", &title(true));
+    let missing = "https://www.schemastore.org/missing.json";
+    let run = env.run(&["--schemafile", missing, &doc]).await;
+    assert_eq!(run.code, 1);
+    assert!(
+        run.output.contains(&format!(
+            "failed to download `{missing}` from mirror `{}`",
+            server.url("/store/missing.json")
+        )),
         "{}",
         run.output
     );
@@ -1234,7 +1281,11 @@ async fn hook_examples() {
                 args.push(&path_arg);
                 args.extend(add_args.iter().map(String::as_str));
                 let run = Env::new().run(&args).await;
-                assert_eq!(run.code, expected, "{id} {root}/{category}/{name}: {}", run.output);
+                assert_eq!(
+                    run.code, expected,
+                    "{id} {root}/{category}/{name}: {}",
+                    run.output
+                );
                 checked += 1;
             }
         }
