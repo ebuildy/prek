@@ -86,6 +86,16 @@ pub(crate) fn skips_install_env(hook: &Hook) -> bool {
     matches!(fast_path_hook(hook), Some(FastPathHook::CheckJsonschema))
 }
 
+/// Whether the check-jsonschema fast path serves `hook_id` from `repo_url`, for callers that
+/// only have the configuration, like `prek cache gc`. Keep in sync with [`fast_path_hook`].
+pub(crate) fn check_jsonschema_fast_path(
+    repo_url: &str,
+    hook_id: &str,
+    language_overridden: bool,
+) -> bool {
+    !*NO_FAST_PATH && !language_overridden && is_upstream_check_jsonschema_hook(repo_url, hook_id)
+}
+
 /// Remote hooks that prek runs with a bundled Rust implementation.
 enum FastPathHook {
     PreCommitHooks(PreCommitHooks),
