@@ -1338,6 +1338,22 @@ async fn stale_cache_does_not_hide_a_deleted_schema() {
     }
 }
 
+/// A `4xx` is not retried, so a later `5xx` cannot turn it into a stale-cache fallback.
+#[tokio::test]
+async fn deleted_schema_is_not_retried() {
+    let server = Server::start();
+    let env = Env::new();
+    server.add_full("/schema1.json", 404, "", &[]);
+    server.add_full("/schema1.json", 500, "", &[]);
+    let url = server.url("/schema1.json");
+    env.inject_cache(&url, r#"{"type": "integer"}"#);
+    let instance = env.write("instance.json", "42");
+    let run = env.run(&["--schemafile", &url, &instance]).await;
+    assert_eq!(run.code, 1);
+    assert!(run.output.contains("status=404"), "{}", run.output);
+    assert_eq!(server.calls("/schema1.json"), 1);
+}
+
 /// A touched cache file must not look newer than a remote change made between its download
 /// and the touch: freshness against `Last-Modified` uses the download time.
 #[tokio::test]

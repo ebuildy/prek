@@ -223,7 +223,6 @@ impl Downloader {
                 Ok(response) => response,
                 Err(err) => {
                     last_error = format!("encountered error during download: {err}");
-                    client_error = false;
                     continue;
                 }
             };
@@ -239,12 +238,16 @@ impl Downloader {
                     "got response with status={}, retries exhausted",
                     response.status
                 );
-                client_error = (400..500).contains(&response.status);
+                // A `4xx` is the server's final answer. Retrying could end on a network error
+                // or `5xx` instead, which would let a stale cached copy hide a deleted schema.
+                if (400..500).contains(&response.status) {
+                    client_error = true;
+                    break;
+                }
                 continue;
             }
             if !parses(&response.body) {
                 last_error = "downloaded content could not be parsed, retries exhausted".into();
-                client_error = false;
                 continue;
             }
             if let Some(path) = cache_file
