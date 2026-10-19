@@ -3770,6 +3770,246 @@ fn check_json5() {
 }
 
 #[test]
+fn check_jsonschema() {
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
+        repos:
+          - repo: builtin
+            hooks:
+              - id: check-jsonschema
+                files: ^config/
+                args: [--schemafile, schema.json]
+    "})
+        .with_file(
+            "schema.json",
+            indoc::indoc! {r#"
+        {
+            "type": "object",
+            "required": ["name"],
+            "properties": {"port": {"type": "integer"}}
+        }
+    "#},
+        )
+        .with_file("config/bad.yaml", "port: nope\n")
+        .with_file("config/good.toml", "name = \"x\"\n")
+        .init_git();
+
+    cmd_snapshot!(context, context.run(), @r#"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check jsonschema.........................................................Failed
+    - hook id: check-jsonschema
+    - description: Validates JSON, YAML and TOML files against a JSON Schema
+    - exit code: 1
+
+      config/bad.yaml:1: /: "name" is a required property
+      config/bad.yaml:1: /port: "nope" is not of type "integer"
+
+    ----- stderr -----
+    "#);
+}
+
+#[test]
+fn check_jsonschema_filetypes_and_formats() {
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
+        repos:
+          - repo: builtin
+            hooks:
+              - id: check-jsonschema
+                files: ^config/
+                args: [--schemafile, schema.json]
+    "})
+        .with_file(
+            "schema.json",
+            indoc::indoc! {r#"
+        {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "enabled": {"type": "string"},
+                "contact": {"type": "string", "format": "email"},
+                "when": {"type": "string", "format": "date-time"}
+            }
+        }
+    "#},
+        )
+        .with_file("config/.renovaterc", r#"{"contact": "nope"}"#)
+        .with_file("config/a.yaml", "enabled: yes\n")
+        .with_file("config/b.toml", "when = 1979-05-27T07:32:00\n")
+        .with_file("config/c.json5", "{enabled: 'x', // comment\n}")
+        .init_git();
+
+    cmd_snapshot!(context, context.run(), @r#"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check jsonschema.........................................................Failed
+    - hook id: check-jsonschema
+    - description: Validates JSON, YAML and TOML files against a JSON Schema
+    - exit code: 1
+
+      config/.renovaterc:1: /contact: "nope" is not a "email"
+
+    ----- stderr -----
+    "#);
+}
+
+/// A stale cached schema is used with a warning when it cannot be refreshed, and counts as
+/// fresh afterwards.
+#[test]
+fn check_jsonschema_offline_uses_stale_cache() -> Result<()> {
+    // Nothing listens on this port once the listener is dropped.
+    let url = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        format!("http://{}/schema.json", listener.local_addr()?)
+    };
+    let context = TestEnv::new()
+        .with_config(format!(
+            indoc::indoc! {r"
+            repos:
+              - repo: builtin
+                hooks:
+                  - id: check-jsonschema
+                    files: ^a\.json$
+                    args: [--schemafile, '{}']
+            "},
+            url
+        ))
+        .with_file("a.json", "42")
+        .with_filter(r"127\.0\.0\.1:\d+", "[HOST]")
+        .with_filter(
+            r"(could not be refreshed, using the cached copy from \d+ days ago): .*",
+            "$1: [ERROR]",
+        )
+        .init_git();
+
+    let name = hex::encode(aws_lc_rs::digest::digest(
+        &aws_lc_rs::digest::SHA256,
+        url.as_bytes(),
+    ));
+    let cache = context
+        .home_dir()
+        .child(format!("cache/check-jsonschema/{name}.json"));
+    cache.write_str(r#"{"type": "integer"}"#)?;
+    let fifteen_days = std::time::Duration::from_hours(15 * 24);
+    fs_err::File::options()
+        .write(true)
+        .open(cache.path())?
+        .set_modified(std::time::SystemTime::now() - fifteen_days)?;
+
+    cmd_snapshot!(context, context.run(), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    check jsonschema.........................................................Passed
+
+    ----- stderr -----
+    warning: `http://[HOST]/schema.json` could not be refreshed, using the cached copy from 15 days ago: [ERROR]
+    ");
+
+    let modified = fs_err::metadata(cache.path())?.modified()?;
+    assert!(modified.elapsed()? < std::time::Duration::from_hours(1));
+
+    // The touched copy is fresh: no request, no warning.
+    cmd_snapshot!(context, context.run(), @r"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    check jsonschema.........................................................Passed
+
+    ----- stderr -----
+    ");
+    Ok(())
+}
+
+/// An invalid `PREK_JSONSCHEMA_MIRROR` fails the hook with a clear message.
+#[test]
+fn check_jsonschema_invalid_mirror() {
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
+        repos:
+          - repo: builtin
+            hooks:
+              - id: check-jsonschema
+                files: ^a\.yaml$
+                args: [--builtin-schema, vendor.github-workflows]
+    "})
+        .with_file("a.yaml", "a: 1\n")
+        .init_git();
+
+    cmd_snapshot!(context, context.run().env(EnvVars::PREK_JSONSCHEMA_MIRROR, "mirror.corp/schemastore"), @r"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check jsonschema.........................................................Failed
+    - hook id: check-jsonschema
+    - description: Validates JSON, YAML and TOML files against a JSON Schema
+    - exit code: 1
+
+      Invalid `PREK_JSONSCHEMA_MIRROR` value `mirror.corp/schemastore`: expected an absolute http(s) URL
+
+    ----- stderr -----
+    ");
+}
+
+/// Hooks from the upstream check-jsonschema repository run with the Rust implementation and
+/// install no Python environment.
+#[test]
+fn check_jsonschema_fast_path() {
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
+        repos:
+          - repo: https://github.com/python-jsonschema/check-jsonschema
+            rev: 0.37.1
+            hooks:
+              - id: check-github-workflows
+              - id: check-metaschema
+                files: ^schemas/
+    "})
+        .with_file(
+            ".github/workflows/ok.yml",
+            "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n",
+        )
+        .with_file(
+            ".github/workflows/bad.yml",
+            "on: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps: 3\n",
+        )
+        .with_file("schemas/bad.json", r#"{"type": "nope"}"#)
+        .init_git();
+
+    cmd_snapshot!(context, context.run(), @r#"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    Validate GitHub Workflows................................................Failed
+    - hook id: check-github-workflows
+    - description: Validate GitHub Workflows against the schema provided by SchemaStore
+    - exit code: 1
+
+      .github/workflows/bad.yml:3: /jobs/build: {"runs-on":"ubuntu-latest","steps":3} is not valid under any of the schemas listed in the 'oneOf' keyword
+        Best match: /jobs/build: Additional properties are not allowed ('runs-on', 'steps' were unexpected)
+        Best deep match: /jobs/build/steps: 3 is not of type "array"
+        1 other errors were produced. Use '--verbose' to see all errors.
+    Validate JSON Schema files...............................................Failed
+    - hook id: check-metaschema
+    - description: Validate JSON Schema files against their matching metaschema
+    - exit code: 1
+
+      schemas/bad.json:1: /type: "nope" is not valid under any of the schemas listed in the 'anyOf' keyword
+        Best match: /type: "nope" is not one of "array", "boolean" or 5 other candidates
+        1 other errors were produced. Use '--verbose' to see all errors.
+
+    ----- stderr -----
+    "#);
+
+    let hooks_dir = context.home_dir().child("hooks");
+    let installed = fs_err::read_dir(hooks_dir.path()).map_or(0, Iterator::count);
+    assert_eq!(installed, 0, "no hook environment should be installed");
+}
+
+#[test]
 fn check_jsonc() {
     let context = TestEnv::new()
         .with_config(indoc::indoc! {r"

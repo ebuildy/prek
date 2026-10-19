@@ -1,0 +1,6 @@
+---
+version: two
+plan:
+  project-key: PROJ
+  key: PLAN
+  name: My Plan
