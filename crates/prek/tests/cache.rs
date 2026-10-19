@@ -811,6 +811,39 @@ fn cache_gc_keeps_tracked_config_on_parse_error() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Downloaded schemas are a cache that check-jsonschema refills on demand, so `cache gc`
+/// removes them even when a config uses the hook.
+#[test]
+fn cache_gc_removes_check_jsonschema_cache() -> anyhow::Result<()> {
+    let context = TestEnv::new()
+        .with_config(indoc::indoc! {r"
+        repos:
+          - repo: builtin
+            hooks:
+              - id: check-jsonschema
+                args: [--schemafile, schema.json]
+        "})
+        .init_git();
+
+    let home = context.home_dir();
+    let config_path = context.child(PRE_COMMIT_CONFIG_YAML);
+    write_config_tracking_file(home, &[config_path.path()])?;
+    create_dirs(home, ["cache/check-jsonschema"])?;
+
+    cmd_snapshot!(context, context.command().arg("cache").arg("gc"), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    Removed 1 cache entry ([SIZE])
+
+    ----- stderr -----
+    ");
+    home.child("cache/check-jsonschema")
+        .assert(predicates::path::missing());
+
+    Ok(())
+}
+
 #[test]
 fn cache_gc_dry_run_does_not_remove_entries() -> anyhow::Result<()> {
     let context = TestEnv::new().with_config("repos: []\n").init_git();

@@ -20,6 +20,7 @@ For `repo: builtin`, the following hooks are supported:
 - [`check-json`](#check-json) (Checks JSON files for parseable syntax.)
 - [`check-json5`](#check-json5) (Checks JSON5 files for parseable syntax.)
 - [`check-jsonc`](#check-jsonc) (Checks JSONC files for parseable syntax.)
+- [`check-jsonschema`](#check-jsonschema) (Validates JSON, YAML and TOML files against a JSON Schema.)
 - [`pretty-format-json`](#pretty-format-json) (Checks that JSON files are pretty-formatted.)
 - [`check-toml`](#check-toml) (Checks TOML files for parseable syntax.)
 - [`check-vcs-permalinks`](#check-vcs-permalinks) (Ensures that links to VCS websites are permalinks.)
@@ -42,7 +43,7 @@ For `repo: builtin`, the following hooks are supported:
 
 ## Automatic Fast Path
 
-Currently, only part of hooks from `https://github.com/pre-commit/pre-commit-hooks` is supported. More popular repositories may be added over time.
+Currently, part of the hooks from `https://github.com/pre-commit/pre-commit-hooks` and all hooks from `https://github.com/python-jsonschema/check-jsonschema` are supported. More popular repositories may be added over time.
 
 - [`trailing-whitespace`](https://github.com/pre-commit/pre-commit-hooks#trailing-whitespace) (Trims trailing whitespace.)
 - [`check-added-large-files`](https://github.com/pre-commit/pre-commit-hooks#check-added-large-files) (Prevents giant files from being committed.)
@@ -66,6 +67,11 @@ Currently, only part of hooks from `https://github.com/pre-commit/pre-commit-hoo
 - [`no-commit-to-branch`](https://github.com/pre-commit/pre-commit-hooks#no-commit-to-branch) (Protects specific branches from direct commits.)
 - [`check-shebang-scripts-are-executable`](https://github.com/pre-commit/pre-commit-hooks#check-shebang-scripts-are-executable) (Ensures that (non-binary) files with a shebang are executable.)
 - [`check-executables-have-shebangs`](https://github.com/pre-commit/pre-commit-hooks#check-executables-have-shebangs) (Ensures that (non-binary) executables have a shebang.)
+
+All 29 hooks from `https://github.com/python-jsonschema/check-jsonschema` (`check-jsonschema`,
+`check-metaschema`, `check-github-workflows`, `check-renovate`, `check-gitlab-ci`, ...) run with
+the [`check-jsonschema`](#check-jsonschema) implementation. Their `entry`, `files` and `types`
+still come from the pinned upstream revision, and no Python environment is installed for them.
 
 ### Notes
 
@@ -317,6 +323,103 @@ repos:
 **Caveats / differences**
 
 - This implementation rejects **duplicate object keys** (errors with `duplicate key ...`).
+
+---
+
+### `check-jsonschema`
+
+A Rust port of [check-jsonschema](https://github.com/python-jsonschema/check-jsonschema).
+It validates JSON, YAML, TOML and JSON5 files against a JSON Schema and accepts the upstream
+command-line options, so upstream hooks run unchanged through the [fast path](#automatic-fast-path).
+The schema is compiled once and every file is checked against it.
+
+The hook does not select any files by default. Set `files` (or `types`) to choose what to validate.
+
+```yaml
+repos:
+  - repo: builtin
+    hooks:
+      - id: check-jsonschema
+        files: '^config/.*\.ya?ml$'
+        args: [--schemafile, schemas/config.schema.json]
+      - id: check-jsonschema
+        name: Validate GitHub workflows
+        files: '^\.github/workflows/[^/]+$'
+        args: [--builtin-schema, vendor.github-workflows]
+```
+
+**Behavior shared with upstream**
+
+- File types come from the extension, case-sensitively: `.json`, `.jsonld`, `.geojson` (JSON),
+  `.yaml`, `.yml`, `.ymlld`, `.eyaml`, `.cff` (YAML), `.json5` and `.toml`. Other files use
+  `--default-filetype`.
+- YAML is read as YAML 1.2 (`yes` and `on` are strings), unknown tags are errors, and
+  timestamps stay strings. TOML datetimes become strings, with `Z` added when there is no offset.
+- Only the formats upstream checks with its default dependencies are enforced: `date`,
+  `date-time`, `time`, `email` and `idn-email` (an `@` check), `idn-hostname`, `ipv4`, `ipv6`,
+  `regex` and `uuid`, in every draft. Other formats such as `uri` or `hostname` are not checked.
+- `$ref` to local files and HTTP(S) URLs is resolved, in JSON, YAML, TOML or JSON5.
+- Downloads are retried twice and cached in prek's cache directory, keyed by URL. When a cached
+  file is revalidated, it is kept unless the server's `Last-Modified` is newer.
+- A schema that cannot be loaded fails this hook only.
+
+**Additions over upstream** (from upstream feature requests)
+
+- Every document of a multi-document YAML file is validated, and errors name the document,
+  such as `ci.yml (document 2)` (upstream #222, #561).
+- Errors in JSON and YAML files include the line of the failing value, such as
+  `ci.yml:12: /jobs/build: ...` (upstream #359). `-o json` adds a `line` field.
+- `--schema-from-instances` validates each document against the schema it names, with a
+  top-level `$schema` key or a `# yaml-language-server: $schema=...` comment. Relative locations
+  resolve against the file's directory. `--schemafile` or `--builtin-schema`, if also given,
+  applies to documents that name no schema (upstream #310, #340, #644).
+- Without `Last-Modified`, the cache is validated with the server's `ETag` (upstream #668).
+- Remote schemas work offline. A cached schema checked less than 14 days ago is used without
+  any request (upstream sends one on every run). An older one is revalidated. If the server
+  cannot be reached, answers with a `5xx` error, or sends a body that does not parse, prek warns
+  and uses the cached copy, which then counts as checked for another 14 days. A `4xx` response
+  such as `404` is still an error, so a deleted schema is reported. `--no-cache` always
+  downloads.
+- `PREK_JSONSCHEMA_MIRROR` fetches `json.schemastore.org` and `www.schemastore.org` schemas
+  from a mirror, for air-gapped environments. This covers `--schemafile`, remote `$ref` and
+  schemas named by documents. Cache entries, `$id` and `$ref` resolution keep the original URL.
+
+**Supported arguments**
+
+- `--schemafile <PATH|URI>`: local path (relative to the project root, `~` and `file://` work)
+  or HTTP(S) URL of the schema.
+- `--builtin-schema <NAME>`: a schema known to upstream, such as `vendor.github-workflows` or
+  `custom.github-workflows-require-timeout`. The `vendor.*` schemas are not embedded in prek.
+  They are downloaded from their publishers (the URLs of upstream's catalog) and cached like
+  `--schemafile` URLs, so the first run needs network access, or `PREK_JSONSCHEMA_MIRROR` for
+  schemas hosted on schemastore. Because the latest published version is used, they change
+  whenever the publisher changes them, whatever `rev` the fast path config names.
+  `custom.github-workflows-require-timeout` is small and embedded.
+- `--check-metaschema`: validate each file as a schema against the metaschema of its `$schema`.
+- `--base-uri <URI>`: override the schema `$id`.
+- `--no-cache`: always download remote schemas.
+- `--disable-formats <FORMAT,...>`: format checks to turn off, comma separated and repeatable.
+  `*` turns off all of them.
+- `--regex-variant {default,nonunicode,python}` (and the legacy `--format-regex`).
+- `--default-filetype {json,yaml,toml,json5}` (default `json`) and `--force-filetype`.
+- `--data-transform {azure-pipelines,gitlab-ci}`.
+- `--fill-defaults`: fill `default` values of `properties` before validating.
+- `--schema-from-instances`: see above.
+- `-o/--output-format {text,json}`, `-v/--verbose`, `-q/--quiet`.
+- `--traceback-mode`, `--cache-filename` and `--color` are accepted and ignored.
+
+**Caveats / differences**
+
+- Errors are printed one per line as `path:line: pointer: message`, and error messages come from
+  the Rust `jsonschema` crate, so their wording differs from upstream.
+- `--validator-class` and reading from stdin (`-`) are not supported.
+- `--regex-variant nonunicode` behaves like `default`, and `python` uses Rust regex syntax that
+  rejects JavaScript-only named groups.
+- `--check-metaschema` does not check Draft 3 documents.
+- YAML numbers with a leading zero such as `017` are read as floats. `.inf` and `.nan` are
+  validated as the largest finite number and `0`, which only matters for range keywords.
+  JSON files with `NaN` or `Infinity` are rejected.
+- `--fill-defaults` follows `properties`, `items` and `allOf`/`anyOf`/`oneOf`, not `$ref`.
 
 ---
 

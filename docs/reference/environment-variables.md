@@ -114,6 +114,19 @@ Mirrors should provide release-compatible Ruby archive assets and a `SHA256SUMS`
 Only exact HTTPS GitHub repository mirrors (`https://github.com/owner/repo`, optionally with port `443`) receive `GITHUB_TOKEN`; other mirrors are used without GitHub authentication.
 See [Ruby language support](language-support.md#ruby) for details.
 
+### `PREK_JSONSCHEMA_MIRROR`
+
+Base URL of a mirror of `json.schemastore.org`, for the `check-jsonschema` built-in hook in
+air-gapped environments. Remote schemas under `https://json.schemastore.org/` or
+`https://www.schemastore.org/` (also `http://`) are fetched from the mirror with the same path and
+query: with `https://mirror.corp/schemastore`,
+`https://json.schemastore.org/github-workflow.json` is fetched from
+`https://mirror.corp/schemastore/github-workflow.json`. Other hosts are not affected. The value
+must be an absolute `http(s)` URL. Schemas are cached and resolved under their original URL.
+This includes the `vendor.*` schemas of `--builtin-schema` that are hosted on schemastore. The
+others (for example GitHub, GitLab or Renovate) are not covered.
+See [`check-jsonschema`](built-in-hooks.md#check-jsonschema) for details.
+
 ### `PREK_CONDA_INSTALLER`
 
 Select the preinstalled tool used to create environments for `language: conda`

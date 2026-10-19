@@ -18,6 +18,7 @@ use crate::config::{self, Error as ConfigError, Repo as ConfigRepo, load_config}
 use crate::hook::{
     HOOK_MARKER, HookEnvRequirement, HookSpec, InstallInfo, Repo as HookRepo, RepoIdentityRef,
 };
+use crate::hooks::check_jsonschema_fast_path;
 use crate::printer::Printer;
 use crate::store::{CacheBucket, REPO_MARKER, Store, ToolBucket};
 
@@ -386,6 +387,14 @@ fn hook_env_requirements_from_config(
                 let remote_repo = RepoIdentityRef::new(repo_config.source(), &repo_config.rev);
 
                 for hook_config in &repo_config.hooks {
+                    // The fast path runs these without their Python environment.
+                    if check_jsonschema_fast_path(
+                        repo_config.source(),
+                        &hook_config.id,
+                        hook_config.language.is_some(),
+                    ) {
+                        continue;
+                    }
                     let Some(manifest_hook) = repo.manifest_hook(&hook_config.id) else {
                         continue;
                     };

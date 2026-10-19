@@ -9,6 +9,7 @@ use prek_consts::env_vars::{EnvVars, EnvVarsRead};
 use crate::cli::run::HookRunReporter;
 use crate::hook::{Hook, Repo};
 pub(crate) use crate::hooks::builtin_hooks::BuiltinHooks;
+use crate::hooks::builtin_hooks::{is_upstream_check_jsonschema_hook, run_check_jsonschema};
 pub(crate) use crate::hooks::meta_hooks::MetaHooks;
 use crate::hooks::pre_commit_hooks::{PreCommitHooks, is_pre_commit_hooks};
 use crate::store::Store;
@@ -78,7 +79,31 @@ pub fn check_fast_path(hook: &Hook) -> bool {
     fast_path_hook(hook).is_some()
 }
 
-fn fast_path_hook(hook: &Hook) -> Option<PreCommitHooks> {
+/// Upstream check-jsonschema hooks served by the fast path skip their Python environment,
+/// which is the slow part of a first run. The check is repeated at run time, so setting
+/// `PREK_NO_FAST_PATH` later still installs the environment when it is needed.
+pub(crate) fn skips_install_env(hook: &Hook) -> bool {
+    matches!(fast_path_hook(hook), Some(FastPathHook::CheckJsonschema))
+}
+
+/// Whether the check-jsonschema fast path serves `hook_id` from `repo_url`, for callers that
+/// only have the configuration, like `prek cache gc`. Keep in sync with [`fast_path_hook`].
+pub(crate) fn check_jsonschema_fast_path(
+    repo_url: &str,
+    hook_id: &str,
+    language_overridden: bool,
+) -> bool {
+    !*NO_FAST_PATH && !language_overridden && is_upstream_check_jsonschema_hook(repo_url, hook_id)
+}
+
+/// Remote hooks that prek runs with a bundled Rust implementation.
+enum FastPathHook {
+    PreCommitHooks(PreCommitHooks),
+    /// Any hook from `https://github.com/python-jsonschema/check-jsonschema`.
+    CheckJsonschema,
+}
+
+fn fast_path_hook(hook: &Hook) -> Option<FastPathHook> {
     // TODO: Decide whether fast-path hooks should honor or ignore a configured `shell`.
     if *NO_FAST_PATH || hook.language_overridden {
         return None;
@@ -87,11 +112,15 @@ fn fast_path_hook(hook: &Hook) -> Option<PreCommitHooks> {
     let Repo::Remote { url, .. } = hook.repo() else {
         return None;
     };
-    if !is_pre_commit_hooks(url) {
-        return None;
+    if is_pre_commit_hooks(url) {
+        return PreCommitHooks::from_str(hook.id.as_str())
+            .ok()
+            .map(FastPathHook::PreCommitHooks);
     }
-
-    PreCommitHooks::from_str(hook.id.as_str()).ok()
+    if is_upstream_check_jsonschema_hook(url, &hook.id) {
+        return Some(FastPathHook::CheckJsonschema);
+    }
+    None
 }
 
 /// Returns whether a hook requires a Git diff to determine file changes.
@@ -104,7 +133,7 @@ pub(crate) fn requires_diff_tracking(hook: &Hook) -> bool {
 }
 
 pub async fn run_fast_path(
-    _store: &Store,
+    store: &Store,
     hook: &Hook,
     filenames: &[&Path],
     reporter: &HookRunReporter,
@@ -114,7 +143,10 @@ pub async fn run_fast_path(
     let Some(implemented) = fast_path_hook(hook) else {
         unreachable!("run_fast_path requires a supported pre-commit hook");
     };
-    let result = implemented.run(hook, filenames).await;
+    let result = match implemented {
+        FastPathHook::PreCommitHooks(implemented) => implemented.run(hook, filenames).await,
+        FastPathHook::CheckJsonschema => run_check_jsonschema(store, hook, filenames).await,
+    };
 
     reporter.on_run_complete(progress);
 
