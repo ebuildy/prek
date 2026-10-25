@@ -206,6 +206,7 @@ Builtin hooks called out by the docs include:
 - `no-commit-to-branch`
 - `check-signed-commit`
 - `check-commit-trailers`
+- `check-conventional-commit`
 - `check-shebang-scripts-are-executable`
 - `check-executables-have-shebangs`
 

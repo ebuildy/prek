@@ -1084,6 +1084,7 @@
         "check-added-large-files",
         "check-case-conflict",
         "check-commit-trailers",
+        "check-conventional-commit",
         "check-executables-have-shebangs",
         "check-illegal-windows-names",
         "check-json",

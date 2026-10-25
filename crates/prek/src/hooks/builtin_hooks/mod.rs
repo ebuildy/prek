@@ -20,9 +20,11 @@ use crate::hooks::{HookFuture, HookOutput};
 use crate::store::Store;
 
 mod check_commit_trailers;
+mod check_conventional_commit;
 mod check_json5;
 mod check_jsonc;
 mod check_signed_commit;
+mod commit_messages;
 mod expand_tabs;
 mod pattern;
 
@@ -44,6 +46,7 @@ pub(crate) enum BuiltinHooks {
     CheckAddedLargeFiles,
     CheckCaseConflict,
     CheckCommitTrailers,
+    CheckConventionalCommit,
     CheckExecutablesHaveShebangs,
     CheckIllegalWindowsNames,
     CheckJson,
@@ -80,6 +83,7 @@ impl BuiltinHooks {
         Some(match self {
             Self::CheckAddedLargeFiles => check_added_large_files::Args::command(),
             Self::CheckCommitTrailers => check_commit_trailers::Args::command(),
+            Self::CheckConventionalCommit => check_conventional_commit::Args::command(),
             Self::CheckJsonc => check_jsonc::Args::command(),
             Self::CheckMergeConflict => check_merge_conflict::Args::command(),
             Self::CheckVcsPermalinks => check_vcs_permalinks::Args::command(),
@@ -119,6 +123,9 @@ impl BuiltinHooks {
             Self::CheckAddedLargeFiles => Box::pin(check_added_large_files::run(hook, filenames)),
             Self::CheckCaseConflict => Box::pin(check_case_conflict::run(hook, filenames)),
             Self::CheckCommitTrailers => Box::pin(check_commit_trailers::run(hook, filenames)),
+            Self::CheckConventionalCommit => {
+                Box::pin(check_conventional_commit::run(hook, filenames))
+            }
             Self::CheckExecutablesHaveShebangs => {
                 Box::pin(check_executables_have_shebangs::run(hook, filenames))
             }
@@ -204,6 +211,22 @@ impl BuiltinHook {
                 options: HookOptions {
                     description: Some(
                         "Checks required and denied commit trailers."
+                            .to_string(),
+                    ),
+                    stages: Some([Stage::CommitMsg, Stage::PrePush].into()),
+                    always_run: Some(true),
+                    ..Default::default()
+                },
+            },
+            BuiltinHooks::CheckConventionalCommit => BuiltinHook {
+                id: "check-conventional-commit".to_string(),
+                name: "check conventional commit".to_string(),
+                entry: "check-conventional-commit".to_string(),
+                priority: None,
+                groups: None,
+                options: HookOptions {
+                    description: Some(
+                        "Checks that commit messages follow the Conventional Commits format."
                             .to_string(),
                     ),
                     stages: Some([Stage::CommitMsg, Stage::PrePush].into()),
