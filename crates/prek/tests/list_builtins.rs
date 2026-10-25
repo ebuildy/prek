@@ -27,6 +27,13 @@ fn list_builtins_defaults_to_verbose_output() {
             --deny <KEY[=REGEX]>     Deny a trailer, or any of its values matching a regex. Repeat for
                                      multiple rules
 
+    check-conventional-commit
+      Checks that commit messages follow the Conventional Commits format.
+      flags:
+            --force-scope         Require a scope, as in `feat(api): description`
+            --scopes <SCOPE,...>  Comma-separated list of allowed scopes
+            --strict              Also check `fixup!`, `squash!`, `amend!`, and merge commits
+
     check-executables-have-shebangs
       Ensures that (non-binary) executables have a shebang.
 
@@ -192,6 +199,11 @@ fn list_builtins_json() {
         "id": "check-commit-trailers",
         "name": "check commit trailers",
         "description": "Checks required and denied commit trailers."
+      },
+      {
+        "id": "check-conventional-commit",
+        "name": "check conventional commit",
+        "description": "Checks that commit messages follow the Conventional Commits format."
       },
       {
         "id": "check-executables-have-shebangs",

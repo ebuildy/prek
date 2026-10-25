@@ -38,6 +38,7 @@ For `repo: builtin`, the following hooks are supported:
 - [`no-commit-to-branch`](#no-commit-to-branch) (Protects specific branches from direct commits.)
 - [`check-signed-commit`](#check-signed-commit) (Ensures commits are signed with a valid GPG/SSH signature before they're pushed.)
 - [`check-commit-trailers`](#check-commit-trailers) (Checks required and denied commit trailers.)
+- [`check-conventional-commit`](#check-conventional-commit) (Checks that commit messages follow the Conventional Commits format.)
 - [`check-shebang-scripts-are-executable`](#check-shebang-scripts-are-executable) (Ensures that (non-binary) files with a shebang are executable.)
 - [`check-executables-have-shebangs`](#check-executables-have-shebangs) (Ensures that (non-binary) executables have a shebang.)
 
@@ -712,6 +713,48 @@ such as `--deny=AI-generated-by`.
   not count as a trailer.
 - Merge commits are skipped. Squash commits are checked. When amending an existing
   merge commit, its message is still checked at `commit-msg`.
+- `pre-push` checks commits being pushed, including empty commits. When
+  pushing multiple refs, only the first ref with pending commits is checked.
+
+---
+
+### `check-conventional-commit`
+
+Checks that commit messages follow the [Conventional Commits](https://www.conventionalcommits.org)
+format, such as `feat(api)!: drop the old endpoint`. This is a Rust port of
+[conventional-pre-commit](https://github.com/compilerla/conventional-pre-commit). At
+`commit-msg`, it checks the message before the commit is created. At `pre-push`, it
+checks the messages of commits being pushed.
+
+**Supported arguments**
+
+- `TYPE...`: Positional list of allowed commit types. Defaults to `build`, `chore`,
+  `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, and `test`.
+  `feat` and `fix` are always allowed.
+- `--force-scope`: Require a scope, as in `feat(api): description`.
+- `--scopes SCOPE,...`: Comma-separated list of allowed scopes. A commit may name
+  several of them, separated by `,`, `/`, `.`, `:`, `#`, or `-`, such as
+  `fix(api,client): ...`.
+- `--strict`: Also check `fixup!`, `squash!`, `amend!`, and merge commits, which are
+  skipped by default.
+
+Types and scopes are matched case-insensitively.
+
+For example, allow an extra `wip` type and require one of two scopes:
+
+```yaml
+default_install_hook_types: [commit-msg, pre-push]
+repos:
+  - repo: builtin
+    hooks:
+      - id: check-conventional-commit
+        args: [--force-scope, --scopes=api,client, wip]
+```
+
+**Caveats**
+
+- A body must be separated from the subject by a blank line.
+- Comment lines and anything below Git's scissors line are ignored at `commit-msg`.
 - `pre-push` checks commits being pushed, including empty commits. When
   pushing multiple refs, only the first ref with pending commits is checked.
 

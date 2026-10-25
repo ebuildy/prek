@@ -4908,3 +4908,237 @@ fn check_commit_trailers_hook_checks_push_ranges_even_without_file_changes() -> 
     "#);
     Ok(())
 }
+
+fn check_conventional_commit_context(args: &str) -> TestEnv {
+    TestEnv::new()
+        .with_config(indoc::formatdoc! {r"
+        default_install_hook_types:
+          - commit-msg
+        repos:
+          - repo: builtin
+            hooks:
+              - id: check-conventional-commit
+                args: {args}
+        "})
+        .init_git()
+}
+
+#[test]
+fn check_conventional_commit_hook_checks_default_types() {
+    let context = check_conventional_commit_context("[]");
+
+    insta::allow_duplicates! {
+        for message in [
+            "feat: add a feature\n",
+            "Fix(api)!: drop the old endpoint\n\nThe endpoint was deprecated.\n\nBREAKING CHANGE: removed\n",
+            "chore: bump\n\n# Please enter the commit message.\n# ------------------------ >8 ------------------------\ndiff\n",
+        ] {
+            context.write_file("MSG", message);
+            cmd_snapshot!(context, context.run().args(["--hook-stage", "commit-msg", "--commit-msg-filename", "MSG"]), @"
+            success: true
+            exit_code: 0
+            ----- stdout -----
+            check conventional commit................................................Passed
+
+            ----- stderr -----
+            ");
+        }
+    }
+
+    context.write_file("MSG", "Add a feature\n");
+    cmd_snapshot!(context, context.run().args(["--hook-stage", "commit-msg", "--commit-msg-filename", "MSG"]), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check conventional commit................................................Failed
+    - hook id: check-conventional-commit
+    - description: Checks that commit messages follow the Conventional Commits format
+    - exit code: 1
+
+      MSG: Missing type in the commit summary, expected `type: description`
+
+    ----- stderr -----
+    ");
+
+    context.write_file("MSG", "wip: add a feature\n");
+    cmd_snapshot!(context, context.run().args(["--hook-stage", "commit-msg", "--commit-msg-filename", "MSG"]), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check conventional commit................................................Failed
+    - hook id: check-conventional-commit
+    - description: Checks that commit messages follow the Conventional Commits format
+    - exit code: 1
+
+      MSG: type `wip` is not allowed, expected one of: build, chore, ci, docs, feat, fix, perf, refactor, revert, style, test
+
+    ----- stderr -----
+    ");
+
+    context.write_file("MSG", "feat(api): \n");
+    cmd_snapshot!(context, context.run().args(["--hook-stage", "commit-msg", "--commit-msg-filename", "MSG"]), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check conventional commit................................................Failed
+    - hook id: check-conventional-commit
+    - description: Checks that commit messages follow the Conventional Commits format
+    - exit code: 1
+
+      MSG: Missing type in the commit summary, expected `type: description`
+
+    ----- stderr -----
+    ");
+
+    context.write_file("MSG", "feat: add a feature\nbody without a blank line\n");
+    cmd_snapshot!(context, context.run().args(["--hook-stage", "commit-msg", "--commit-msg-filename", "MSG"]), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check conventional commit................................................Failed
+    - hook id: check-conventional-commit
+    - description: Checks that commit messages follow the Conventional Commits format
+    - exit code: 1
+
+      MSG: Incorrect body syntax
+
+    ----- stderr -----
+    ");
+}
+
+#[test]
+fn check_conventional_commit_hook_checks_custom_types_and_scopes() {
+    let context =
+        check_conventional_commit_context("[--force-scope, --scopes, 'api,pre-commit', wip]");
+
+    insta::allow_duplicates! {
+        for message in [
+            "wip(api): add a feature\n",
+            "fix(API, pre-commit): fix a bug\n",
+            "feat(api/pre-commit): add a feature\n",
+        ] {
+            context.write_file("MSG", message);
+            cmd_snapshot!(context, context.run().args(["--hook-stage", "commit-msg", "--commit-msg-filename", "MSG"]), @"
+            success: true
+            exit_code: 0
+            ----- stdout -----
+            check conventional commit................................................Passed
+
+            ----- stderr -----
+            ");
+        }
+    }
+
+    context.write_file("MSG", "chore(api): bump\n");
+    cmd_snapshot!(context, context.run().args(["--hook-stage", "commit-msg", "--commit-msg-filename", "MSG"]), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check conventional commit................................................Failed
+    - hook id: check-conventional-commit
+    - description: Checks that commit messages follow the Conventional Commits format
+    - exit code: 1
+
+      MSG: type `chore` is not allowed, expected one of: feat, fix, wip
+
+    ----- stderr -----
+    ");
+
+    context.write_file("MSG", "feat: add a feature\n");
+    cmd_snapshot!(context, context.run().args(["--hook-stage", "commit-msg", "--commit-msg-filename", "MSG"]), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check conventional commit................................................Failed
+    - hook id: check-conventional-commit
+    - description: Checks that commit messages follow the Conventional Commits format
+    - exit code: 1
+
+      MSG: missing scope, expected `type(scope): description`
+
+    ----- stderr -----
+    ");
+
+    context.write_file("MSG", "feat(cli): add a feature\n");
+    cmd_snapshot!(context, context.run().args(["--hook-stage", "commit-msg", "--commit-msg-filename", "MSG"]), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check conventional commit................................................Failed
+    - hook id: check-conventional-commit
+    - description: Checks that commit messages follow the Conventional Commits format
+    - exit code: 1
+
+      MSG: scope `cli` is not allowed, expected one of: api, pre-commit
+
+    ----- stderr -----
+    ");
+}
+
+#[test]
+fn check_conventional_commit_hook_skips_autosquash_and_merges_unless_strict() {
+    let context = check_conventional_commit_context("[]");
+    context.git().commit("Initial commit");
+    context.git().run(["checkout", "-b", "feature"]);
+    context
+        .git()
+        .run(["commit", "--allow-empty", "-m", "feat: feature change"]);
+    context.git().run(["checkout", "master"]);
+    context.install().assert().success();
+
+    context.write_file("MSG", "fixup! feat: feature change\n");
+    cmd_snapshot!(context, context.run().args(["--hook-stage", "commit-msg", "--commit-msg-filename", "MSG"]), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+    check conventional commit................................................Passed
+
+    ----- stderr -----
+    ");
+    cmd_snapshot!(context, context.git().command().args(["merge", "--quiet", "--no-ff", "feature", "-m", "Merge branch 'feature'"]), @"
+    success: true
+    exit_code: 0
+    ----- stdout -----
+
+    ----- stderr -----
+    check conventional commit................................................Passed
+    ");
+
+    let context = check_conventional_commit_context("[--strict]");
+    context.git().commit("Initial commit");
+    context.git().run(["checkout", "-b", "feature"]);
+    context
+        .git()
+        .run(["commit", "--allow-empty", "-m", "feat: feature change"]);
+    context.git().run(["checkout", "master"]);
+    context.install().assert().success();
+
+    context.write_file("MSG", "fixup! feat: feature change\n");
+    cmd_snapshot!(context, context.run().args(["--hook-stage", "commit-msg", "--commit-msg-filename", "MSG"]), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+    check conventional commit................................................Failed
+    - hook id: check-conventional-commit
+    - description: Checks that commit messages follow the Conventional Commits format
+    - exit code: 1
+
+      MSG: Missing type in the commit summary, expected `type: description`
+
+    ----- stderr -----
+    ");
+    cmd_snapshot!(context, context.git().command().args(["merge", "--quiet", "--no-ff", "feature", "-m", "Merge branch 'feature'"]), @"
+    success: false
+    exit_code: 1
+    ----- stdout -----
+
+    ----- stderr -----
+    check conventional commit................................................Failed
+    - hook id: check-conventional-commit
+    - description: Checks that commit messages follow the Conventional Commits format
+    - exit code: 1
+
+      .git/MERGE_MSG: Missing type in the commit summary, expected `type: description`
+    Not committing merge; use 'git commit' to complete the merge.
+    ");
+}
