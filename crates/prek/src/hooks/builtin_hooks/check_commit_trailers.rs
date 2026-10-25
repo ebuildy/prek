@@ -6,11 +6,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use clap::Parser;
 use fancy_regex::Regex;
-use itertools::Itertools;
-use prek_consts::env_vars::{EnvVars, EnvVarsRead};
 
-use crate::git;
 use crate::hook::Hook;
+use crate::hooks::builtin_hooks::commit_messages::commit_messages;
 use crate::hooks::{HookOutput, parse_hook_args};
 
 #[derive(Parser)]
@@ -105,64 +103,8 @@ pub(crate) async fn run(hook: &Hook, filenames: &[&Path]) -> Result<HookOutput> 
     }
 
     let mut output = Vec::new();
-    match EnvVars.var(EnvVars::PREK_HOOK_STAGE).as_deref() {
-        Ok("commit-msg") => {
-            if filenames.is_empty() {
-                anyhow::bail!("Expected a commit message filename");
-            }
-            // Skip commit-msg checks triggered by `git merge`.
-            if git::git_dir()?.join("MERGE_HEAD").try_exists()? {
-                return Ok(HookOutput::unchanged(0, output));
-            }
-            for filename in filenames {
-                let message = fs_err::tokio::read_to_string(hook.work_dir().join(filename)).await?;
-                let message = message
-                    .lines()
-                    // Ignore content below Git's scissors marker, including verbose diffs.
-                    .take_while(|line| {
-                        *line != "# ------------------------ >8 ------------------------"
-                    })
-                    .filter(|line| !line.starts_with('#'))
-                    .join("\n");
-                check_message(
-                    &filename.display().to_string(),
-                    &message,
-                    &args,
-                    &mut output,
-                )?;
-            }
-        }
-        Ok("pre-push") => {
-            let to = EnvVars
-                .var(EnvVars::PRE_COMMIT_TO_REF)
-                .context("The pre-push stage requires a commit range")?;
-            let range = match EnvVars.var(EnvVars::PRE_COMMIT_FROM_REF) {
-                Ok(from) => format!("{from}..{to}"),
-                Err(_) => to,
-            };
-            let commits = git::git_cmd()?
-                .current_dir(hook.work_dir())
-                .args([
-                    "log",
-                    "--no-merges",
-                    "--no-show-signature",
-                    "--format=%h%n%B",
-                    "-z",
-                    "--end-of-options",
-                ])
-                .arg(range)
-                .arg("--")
-                .output()
-                .await?;
-            let commits = String::from_utf8_lossy(&commits.stdout);
-            for record in commits.split('\0').filter(|record| !record.is_empty()) {
-                let (source, message) = record
-                    .split_once('\n')
-                    .context("Invalid commit message record from Git")?;
-                check_message(source, message, &args, &mut output)?;
-            }
-        }
-        _ => anyhow::bail!("check-commit-trailers requires the commit-msg or pre-push stage"),
+    for commit in commit_messages(hook, filenames, true).await? {
+        check_message(&commit.source, &commit.message, &args, &mut output)?;
     }
     Ok(HookOutput::unchanged(i32::from(!output.is_empty()), output))
 }

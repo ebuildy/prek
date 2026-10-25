@@ -23,6 +23,7 @@ mod check_commit_trailers;
 mod check_json5;
 mod check_jsonc;
 mod check_signed_commit;
+mod commit_messages;
 mod expand_tabs;
 mod pattern;
 
